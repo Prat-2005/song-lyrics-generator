@@ -15,10 +15,10 @@ This project uses a word-level LSTM trained on song lyrics to generate new text 
 | Vocabulary Size | 4,981 |
 | Embedding Dimension | 128 |
 | Hidden Dimension | 512 |
-| LSTM Layers | 2 |
+| LSTM Layers | 3 |
 | Dropout | 0.2 |
 | Sequence Length | 20 |
-| Total Parameters | ~ |
+| Total Parameters | ~8.7M |
 
 ## Installation
 
