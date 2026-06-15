@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python -m py_compile src/model.py src/utils.py src/inference.py app.py)",
+      "PowerShell(python check_checkpoint.py)",
+      "PowerShell(python test_load_model.py)",
+      "PowerShell(python inspect_checkpoint.py)"
+    ]
+  }
+}
