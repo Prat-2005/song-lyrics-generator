@@ -3,6 +3,11 @@
 ## Project Overview
 This project uses a word-level LSTM trained on song lyrics to generate new text from a prompt. The model can create original song lyrics based on a short input phrase.
 
+
+# Screenshots
+
+![Not Found](ss/image.png)
+
 ## Model Architecture
 
 | Hyperparameter | Value |
@@ -40,9 +45,6 @@ streamlit run app.py
 **Prompt:** `you better`
 > you better run your whole ass in the door of me fuck all that was a girl all this shit is mine and i ain't gon' let 'em like that i won't do for her i just want it just stuck on
 
-## Screenshots
-
-![Not Found](ss/image.png)
 
 ## Project Structure
 
