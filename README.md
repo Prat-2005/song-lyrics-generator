@@ -42,7 +42,7 @@ streamlit run app.py
 
 ## Screenshots
 
-![App Screenshot](ss/image.png)
+![Screenshot](ss/image.png)
 
 ## Project Structure
 
