@@ -9,7 +9,10 @@ files = [
     "../data/Drake.csv",
     "../data/NickiMinaj.csv",
     "../data/ColdPlay.csv",
-    "../data/BillieEilish.csv"
+    "../data/BillieEilish.csv",
+    "../data/EdSheeran.csv",
+    "../data/ArianaGrande.csv",
+    "../data/Rihanna.csv"
 ]
 
 dfs = []
