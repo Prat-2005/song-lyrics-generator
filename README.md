@@ -83,7 +83,7 @@ The app will open at `http://localhost:8501` with a model selector in the sideba
 > i am no matter oh shit it's too mainstream and it's cold it's ridiculous he says but i'm going for that static that i was done with all i just do is murder hands through my head so i didn't feel so much more as a white life you can get ourselves off of this bitch and i got a breath and a sexy father i'ma make a whole damn life and i can't figure out which spice eminem i want to make a new wallet like a fat butt and make the beat down and turn off and make 'em all i do is number the way that i do is number time that you did i never want i think of a girl and i don't really got shit in my eyes but what would you do how to do
 
 **Prompt:** `you better` 
-> you better off rock with you and i say i let you off yeah and if i can't go boy i'm on a star 'cause your body rock and you don't give it then you don't let the streets get it on
+> you better stop using your hands on me, i'm victim of physical abuse by my fiance you drifting by nature stop hella body pick me knockin' stopping on this hoe bitch stop tryin' get flames down too long night a name on me but you you dropping you see another time time is steady devils thought
 
 ## Project Structure
 
