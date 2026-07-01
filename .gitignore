@@ -6,9 +6,6 @@ __pycache__/
 venv/
 .venv/
 
-# PyTorch checkpoints
-models/*.pth
-
 # Streamlit
 .streamlit/
 
@@ -18,7 +15,6 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
-notebooks/
 
 # .md file
 PROMPT.md
