@@ -1,6 +1,15 @@
 import numpy as np
-from retrieval import LyricsRetriever
-from tools import get_rhymes, count_syllables
+from src.retrieval import LyricsRetriever
+from src.tools import get_rhymes, count_syllables
+
+# Shared retriever instance to avoid reloading model and index on every call
+_shared_retriever = None
+
+def get_retriever():
+    global _shared_retriever
+    if _shared_retriever is None:
+        _shared_retriever = LyricsRetriever()
+    return _shared_retriever
 
 def rhyme_density(text: str) -> float:
     """
@@ -51,7 +60,7 @@ def originality_score(generated_text: str) -> float:
     Compare generated lines against the corpus.
     Returns (1.0 - max_similarity).
     """
-    retriever = LyricsRetriever()
+    retriever = get_retriever()
 
     lines = [line.strip() for line in generated_text.split('\n') if line.strip()]
     if not lines:
@@ -67,7 +76,7 @@ def originality_score(generated_text: str) -> float:
     for emb in gen_embeddings:
         norm_emb = emb / np.linalg.norm(emb)
 
-        # Search the index 
+        # Search the index
         dist, _ = retriever.index.search(norm_emb.reshape(1, -1), 1)
 
         # Since the index is IndexFlatIP and vectors are normalized,
@@ -76,9 +85,3 @@ def originality_score(generated_text: str) -> float:
         max_sim = max(max_sim, sim)
 
     return 1.0 - max_sim
-
-if __name__ == "__main__":
-    sample_text = "I love the city lights\nWalking through the nights\nIt feels so right\nIn the pale moonlight"
-    print(f"Rhyme Density: {rhyme_density(sample_text):.2f}")
-    print(f"Syllable Consistency: {syllable_consistency(sample_text):.2f}")
-    print(f"Originality Score: {originality_score(sample_text):.2f}")

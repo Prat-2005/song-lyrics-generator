@@ -8,7 +8,12 @@ load_dotenv()
 # --- Project Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
+CACHE_DIR = BASE_DIR / "cache"
 MODELS_DIR = BASE_DIR / "models"
+
+# Ensure directories exist
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 DATA_PATH = os.getenv("DATA_PATH", str(DATA_DIR))
 if not Path(DATA_PATH).is_absolute():
@@ -30,8 +35,9 @@ MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", "120"))
 
 # --- Fallback LLM Configuration ---
 FALLBACK_PROVIDER = os.getenv("FALLBACK_PROVIDER", "groq")
-FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "llama3-70b-8192")
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "llama-3.1-8b-instant")
 FALLBACK_API_KEY = os.getenv("FALLBACK_API_KEY", "")
+FALLBACK_BASE_URL = os.getenv("FALLBACK_BASE_URL", "https://api.groq.com/openai/v1")
 
 # --- Retrieval Settings ---
 RETRIEVAL_MODEL_NAME = os.getenv("RETRIEVAL_MODEL_NAME", "all-MiniLM-L6-v2")
@@ -54,6 +60,3 @@ def validate_config():
         print("Please check your .env file or directory structure.\n")
     else:
         print("Configuration validated.")
-
-if __name__ == "__main__":
-    validate_config()

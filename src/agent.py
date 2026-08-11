@@ -1,10 +1,11 @@
 import requests
 import json
 import time
+import re
 from openai import OpenAI
-from tools import TOOL_SCHEMAS, TOOL_FUNCTIONS, get_similar_lines, count_syllables, get_rhymes
-from config import LOCAL_URL, LOCAL_MODEL, LOCAL_PROVIDER, MODEL_TIMEOUT, FALLBACK_PROVIDER, FALLBACK_MODEL, FALLBACK_API_KEY
-from evaluate import rhyme_density, syllable_consistency, originality_score
+from src.tools import TOOL_SCHEMAS, TOOL_FUNCTIONS, get_similar_lines, count_syllables, get_rhymes
+from src.config import LOCAL_URL, LOCAL_MODEL, LOCAL_PROVIDER, MODEL_TIMEOUT, FALLBACK_PROVIDER, FALLBACK_MODEL, FALLBACK_API_KEY, FALLBACK_BASE_URL
+from src.evaluate import rhyme_density, syllable_consistency, originality_score
 
 _fallback_client = None
 
@@ -22,18 +23,48 @@ def parse_tool_arguments(args):
     return {}
 
 
+def sanitize_lyrics_output(text):
+    """Remove tool call JSON snippets, <tools> tags, and markdown code wrappers from lyrics."""
+    if not text:
+        return ""
+
+    # Remove <tools>...</tools> tags
+    text = re.sub(r'<tools>.*?</tools>', '', text, flags=re.DOTALL)
+
+    # Remove markdown code blocks containing tool JSON
+    text = re.sub(r'```(?:json)?\s*\{\s*"name"\s*:.*?\}\s*```', '', text, flags=re.DOTALL)
+
+    # Remove raw {"name": ...} lines/blocks
+    text = re.sub(r'\{\s*"name"\s*:\s*"[^"]+".*?\}', '', text, flags=re.DOTALL)
+
+    # Filter out standalone tags or backtick fences
+    lines = [
+        line for line in text.splitlines() 
+        if not line.strip().startswith('```') 
+        and line.strip() not in ('<tools>', '</tools>')
+    ]
+    return "\n".join(lines).strip()
+
+
 def normalize_tool_calls(response):
     """Ensure tool calls are in the 'tool_calls' list, even if provided as text."""
     if not response: return response
     if response.get("tool_calls"): return response
 
     content = (response.get("content") or "").strip()
-    if content.startswith("{") and '"name"' in content:
+    matches = re.findall(r'(\{\s*"name"\s*:\s*"[^"]+".*?\})', content, re.DOTALL)
+    extracted_calls = []
+    for match in matches:
         try:
-            parsed = json.loads(content)
+            parsed = json.loads(match)
             if isinstance(parsed, dict) and "name" in parsed:
-                response["tool_calls"] = [{"function": parsed}]
-        except: pass
+                extracted_calls.append({"id": f"call_{int(time.time())}", "function": parsed})
+        except Exception:
+            pass
+
+    if extracted_calls:
+        response["tool_calls"] = extracted_calls
+
     return response
 
 def execute_tool_call(func_name, args):
@@ -90,6 +121,7 @@ def resolve_response_with_tools(messages, temperature, tool_logs, max_rounds=4):
 
             messages.append({
                 "role": "tool",
+                "tool_call_id": tool_call.get("id"),
                 "content": str(result),
                 "name": func_name
             })
@@ -111,18 +143,23 @@ def resolve_response_with_tools(messages, temperature, tool_logs, max_rounds=4):
 def get_fallback_client():
     global _fallback_client
     if not _fallback_client:
-        _fallback_client = OpenAI(api_key=FALLBACK_API_KEY)
+        client_kwargs = {"api_key": FALLBACK_API_KEY}
+        if FALLBACK_BASE_URL:
+            client_kwargs["base_url"] = FALLBACK_BASE_URL
+        _fallback_client = OpenAI(**client_kwargs)
     return _fallback_client
 
 def call_fallback_llm(messages, tools=None, temperature=1.0, stream_callback=None):
+    if not FALLBACK_API_KEY:
+        print("Fallback LLM error: API key is not set. Please set FALLBACK_API_KEY.")
+        return None
+
     client = get_fallback_client()
     
     # Map tools to OpenAI format if provided
     formatted_tools = tools if tools else None
 
     try:
-        if client == "":
-            raise ValueError("Fallback LLM error: API key is not set. Please set FALLBACK_API_KEY.")
         response = client.chat.completions.create(
             model=FALLBACK_MODEL,
             messages=messages,
@@ -146,7 +183,7 @@ def call_fallback_llm(messages, tools=None, temperature=1.0, stream_callback=Non
             result = {"role": "assistant", "content": msg.content or ""}
             if msg.tool_calls:
                 result["tool_calls"] = [
-                    {"function": {"name": t.function.name, "arguments": t.function.arguments}} 
+                    {"id": t.id, "function": {"name": t.function.name, "arguments": t.function.arguments}}
                     for t in msg.tool_calls
                 ]
             return result
@@ -196,7 +233,7 @@ def generate_lyrics_v2(theme, artist_style=None, mood="emotional", max_words=120
 
     # 1. Initial Context Retrieval
     print(f"Retrieving context for theme: {theme}...")
-    similar_lines = get_similar_lines(theme, artist=artist_style, k=5)
+    similar_lines = get_similar_lines(theme, artist=artist_style, k=10)
     context_str = "\n".join([f"- {l}" for l in similar_lines])
 
     system_prompt = (
@@ -204,13 +241,16 @@ def generate_lyrics_v2(theme, artist_style=None, mood="emotional", max_words=120
         f"perfectly capture the essence of {artist_style if artist_style else 'a versatile artist'}. "
         "You do not just write; you engineer lyrics for maximum emotional impact, rhyme precision, and rhythmic flow. "
         "\n\nCORE GUIDELINES:\n"
-        "1. STYLE MATCHING: Use `get_similar_lines` to analyze the provided artist's vocabulary, lyrics written style, and thematic patterns. "
-        "Do not copy verbatim, but emulate the 'soul' of their writing.\n"
+        "1. STYLE & TONE MATCHING: Use `get_similar_lines` to analyze the provided artist's vocabulary, linguistic quirks, slang, "
+        "and thematic patterns. ABSOLUTELY AVOID 'CLEAN', GENERIC, OR AI-LIKE LANGUAGE. Embrace the artist's specific dialect, "
+        "emotional cadence, and stylistic imperfections (e.g., fragmented lines, colloquialisms, conversational ad-libs, or specific repetitions). "
+        "Emulate the 'soul' and 'voice' of their writing—if they are gritty, be gritty; if they are melodic and poetic, be that. "
+        "The lyrics should feel like they were written by the artist, not an AI simulating an artist.\n"
         "2. RHYME & METER: Use `get_rhymes` to find sophisticated end-rhymes. Ensure the meter (syllable count per line) "
-        "is consistent and intentional.\n"
-        "3. AUTHENTICITY: Avoid clichés. If a line feels generic, use retrieval to find a more unique angle.\n"
-        "4. ITERATION: You will be critiqued based on programmatic metrics (Rhyme Density, Syllable Consistency, Originality). "
-        "Your goal is to satisfy these constraints before finalizing your draft.\n"
+        "is consistent and intentional, matching the artist's typical flow and rhythmic delivery.\n"
+        "3. AUTHENTICITY: Avoid clichés. If a line feels generic, use retrieval to find a more unique angle that fits the artist's persona.\n"
+        "4. ITERATION: You will be critiqued based on programmatic metrics (Rhyme Density, Syllable Consistency, Originality), "
+        "stylistic authenticity, and length. Your goal is to satisfy these constraints before finalizing your draft.\n"
         "5. TOOLS: If you want to use a tool (e.g. get_rhymes), use the tool calling API provided. DO NOT output the tool call JSON in your text response.\n"
         "6. FORMAT: OUTPUT YOUR FINAL LYRICS IN PLAIN TEXT ONLY. DO NOT OUTPUT JSON. DO NOT WRAP IN MARKDOWN CODE BLOCKS. NO FORMATTING OTHER THAN NEWLINES."
     )
@@ -219,7 +259,8 @@ def generate_lyrics_v2(theme, artist_style=None, mood="emotional", max_words=120
         f"Theme: {theme}\nMood: {mood}\n"
         f"Artist Style: {artist_style if artist_style else 'Generic'}\n\n"
         f"Reference lines from the dataset:\n{context_str}\n\n"
-        f"Please write a verse with approximately {max_words} words. Output the lyrics in plain text only."
+        f"Please write a full song structure (including Verses and a Chorus) with approximately {max_words} words. "
+        "Ensure the content is substantial and fully explores the theme. Output the lyrics in plain text only."
     )
 
     messages = [
@@ -238,7 +279,7 @@ def generate_lyrics_v2(theme, artist_style=None, mood="emotional", max_words=120
         # Generate/Regenerate and resolve tool calls before consuming text output.
         response = resolve_response_with_tools(messages, temperature, tool_logs)
         if not response:
-            return "Error: Could not connect to LLM.", []
+            return "Error: Could not connect to LLM.", [], {}
 
         current_lyrics = response["content"]
         messages.append({"role": "assistant", "content": current_lyrics})
@@ -264,18 +305,23 @@ def generate_lyrics_v2(theme, artist_style=None, mood="emotional", max_words=120
         rd = rhyme_density(current_lyrics)
         sc = syllable_consistency(current_lyrics)
         os = originality_score(current_lyrics)
+        current_word_count = len(current_lyrics.split())
 
         critique_prompt = (
             f"Here is the current draft:\n{current_lyrics}\n\n"
             f"--- METRIC ANALYSIS ---\n"
             f"Rhyme Density: {rd:.2%} (Target: >30%)\n"
             f"Syllable Consistency: {sc:.2%} (Target: >70%)\n"
-            f"Originality Score: {os:.2%} (Target: >80%)\n\n"
+            f"Originality Score: {os:.2%} (Target: >80%)\n"
+            f"Current Length: {current_word_count} words (Target: ~{max_words} words)\n\n"
             f"--- METER ANALYSIS ---\n"
             f"{syllable_report}\n\n"
-            "Analyze these metrics. If the rhyme is weak, the meter is inconsistent, or the lyrics "
-            "feel too close to the training data, suggest a specific line-by-line revision. "
-            "If the draft meets all targets and feels authentic, respond with 'FINAL'."
+            f"--- TONE ANALYSIS ---\n"
+            f"Artist Style Target: {artist_style if artist_style else 'Generic'}\n\n"
+            "Analyze these metrics and the artist's tone. If the rhyme is weak, the meter is inconsistent, "
+            "the lyrics are significantly shorter than the target length, or the artist's voice (slang, cadence, soul) is missing, "
+            "suggest a specific line-by-line revision to make it more substantial and authentic. "
+            "If the draft meets all targets (including length) and feels authentic to the artist, respond with 'FINAL'."
         )
 
         critique_messages = [{"role": "user", "content": critique_prompt}]
@@ -287,21 +333,21 @@ def generate_lyrics_v2(theme, artist_style=None, mood="emotional", max_words=120
         print(f"Critique: {critique_res['content']}")
         messages.append({"role": "user", "content": f"Critique: {critique_res['content']}\nPlease revise the lyrics based on this critique. Output ONLY the revised lyrics in plain text. Do NOT use JSON, markdown blocks, or tool calls. Just output the lyrics directly as plain text."})
 
-    # Final Guard: Ensure output is not JSON
-    if current_lyrics.strip().startswith("{"):
+    # Final Guard: Sanitize output and ensure it is not JSON or empty
+    current_lyrics = sanitize_lyrics_output(current_lyrics)
+
+    if not current_lyrics or current_lyrics.startswith("{"):
         repair_messages = messages + [{
             "role": "user",
-            "content": "Your last response was JSON. Please provide the FINAL lyrics in plain text only, no JSON."
+            "content": "Your last response contained tool JSON or tags. Please provide ONLY the final song lyrics as plain text. Do NOT include JSON, code blocks, or tool calls."
         }]
-        repaired = call_local_llm(repair_messages, tools=None, temperature=temperature)
+        repaired = call_local_llm(repair_messages, tools=None, temperature=min(temperature, 1.0))
         if repaired:
-            current_lyrics = repaired.get("content", current_lyrics)
+            current_lyrics = sanitize_lyrics_output(repaired.get("content", current_lyrics))
 
     # Final cleanup and streaming step
     if stream_callback:
         print("Streaming final polished lyrics to UI...")
-        # We split by spaces but preserve newlines
-        # A simpler way is to yield character by character, or chunk by chunk
         full_content = ""
         chunk_size = 3
         for i in range(0, len(current_lyrics), chunk_size):
@@ -310,19 +356,11 @@ def generate_lyrics_v2(theme, artist_style=None, mood="emotional", max_words=120
             stream_callback(chunk, full_content)
             time.sleep(0.02)
 
-    return current_lyrics, tool_logs
+    # Calculate final metrics
+    metrics = {
+        "rhyme_density": rhyme_density(current_lyrics),
+        "syllable_consistency": syllable_consistency(current_lyrics),
+        "originality_score": originality_score(current_lyrics),
+    }
 
-if __name__ == "__main__":
-    # Simple test
-    theme = "loneliness in a big city"
-    artist = "Drake"
-    mood = "melancholic"
-
-    print(f"Generating lyrics for '{theme}' in style of {artist}...")
-    lyrics, logs = generate_lyrics_v2(theme, artist, mood)
-
-    print("\n--- FINAL LYRICS ---")
-    print(lyrics)
-    print("\n--- TOOL LOGS ---")
-    for log in logs:
-        print(log)
+    return current_lyrics, tool_logs, metrics

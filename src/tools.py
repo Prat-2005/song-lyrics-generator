@@ -1,6 +1,6 @@
 import re
 import pronouncing
-from retrieval import LyricsRetriever
+from src.retrieval import LyricsRetriever
 
 retriever = LyricsRetriever()
 
@@ -62,22 +62,6 @@ def count_syllables(text: str = None, line: str = None):
             total_syllables += count
     return total_syllables
 
-def check_sentiment(text: str):
-    """Simple keyword-based sentiment tagging."""
-    positive_words = {"love", "happy", "bright", "shine", "good", "great", "beautiful", "heaven", "joy"}
-    negative_words = {"hate", "sad", "dark", "pain", "bad", "worst", "hell", "cry", "alone", "broken"}
-
-    words = re.findall(r'\w+', text.lower())
-    pos_count = sum(1 for w in words if w in positive_words)
-    neg_count = sum(1 for w in words if w in negative_words)
-
-    if pos_count > neg_count:
-        return "positive"
-    elif neg_count > pos_count:
-        return "negative"
-    else:
-        return "neutral"
-
 def get_similar_lines(query: str, artist: str = None, k: int = 5):
     """Wrap the retrieval system for tool use."""
     return retriever.retrieve_similar_lines(query, artist, k)
@@ -117,20 +101,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "check_sentiment",
-            "description": "Analyze the sentiment of a piece of text.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "The text to analyze for sentiment."}
-                },
-                "required": ["text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "get_similar_lines",
             "description": "Retrieve existing lines from the dataset that are similar to a query.",
             "parameters": {
@@ -149,6 +119,5 @@ TOOL_SCHEMAS = [
 TOOL_FUNCTIONS = {
     "get_rhymes": get_rhymes,
     "count_syllables": count_syllables,
-    "check_sentiment": check_sentiment,
     "get_similar_lines": get_similar_lines
 }

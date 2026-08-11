@@ -8,3 +8,4 @@ pronouncing
 requests
 python-dotenv
 openai
+pytest

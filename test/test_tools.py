@@ -1,38 +1,34 @@
-import unittest
-import sys
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from src.tools import get_rhymes, count_syllables, check_sentiment
 
-# Ensure src is in the python path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
+def test_get_rhymes():
+    # Basic rhyme check
+    rhymes = get_rhymes("blue")
+    assert isinstance(rhymes, list)
+    assert len(rhymes) >= 0
 
-# We patch LyricsRetriever before importing tools, because it's instantiated at the module level.
-with patch('retrieval.LyricsRetriever', autospec=True) as MockRetriever:
-    from tools import check_sentiment, count_syllables, get_rhymes, get_similar_lines, retriever
+def test_count_syllables_single_line():
+    # Simple words
+    assert count_syllables("Hello world") == 3
+    assert count_syllables("Syllable") == 3
+    assert count_syllables("A") == 1
+    # Complex word
+    assert count_syllables("Incomprehensible") == 6
 
-class TestTools(unittest.TestCase):
-    def test_check_sentiment_positive(self):
-        """Test positive sentiment"""
-        self.assertEqual(check_sentiment("I love this beautiful day and I feel happy"), "positive")
+def test_count_syllables_multiline():
+    text = "Hello world\nHow are you"
+    # Hello world (3), How are you (3)
+    result = count_syllables(text)
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert result == [3, 3]
 
-    def test_check_sentiment_negative(self):
-        """Test negative sentiment"""
-        self.assertEqual(check_sentiment("This is bad, I feel alone in the dark"), "negative")
+def test_count_syllables_edge_cases():
+    assert count_syllables(None) == 0
+    assert count_syllables("") == 0
+    assert count_syllables("   ") == 0
 
-    def test_check_sentiment_neutral(self):
-        """Test neutral sentiment"""
-        self.assertEqual(check_sentiment("I am walking down the street"), "neutral")
-        
-    def test_count_syllables(self):
-        """Test syllable counting on words and lines"""
-        # Single word (1 syllable)
-        self.assertEqual(count_syllables("cat"), 1)
-        # Multiple words
-        self.assertEqual(count_syllables("hello world"), 3)
-        # Empty string
-        self.assertEqual(count_syllables(""), 0)
-        # Multiple lines
-        self.assertEqual(count_syllables("hello\nworld"), [2, 1])
-
-if __name__ == '__main__':
-    unittest.main()
+def test_check_sentiment():
+    assert check_sentiment("I love this beautiful day") == "positive"
+    assert check_sentiment("I hate this dark pain") == "negative"
+    assert check_sentiment("The cat sat on the mat") == "neutral"
+    assert check_sentiment("") == "neutral"

@@ -24,15 +24,11 @@ PROMPT.md
 PROMPT_v2.md
 PROMPT_v3.md
 
-# data
-data/*.csv
-!data/mixed_lyrics.csv
-
 # v1
 legacy/
 models/best_transformer_model.pth
 models/lyrics_lstm_checkpoint.pth
 src/utils.py
 models/
-data/
 notebooks/
+cache/

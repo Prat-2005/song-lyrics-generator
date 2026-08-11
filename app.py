@@ -8,23 +8,63 @@ def main():
     # Page config
     st.set_page_config(page_title="Song Lyrics Generator", page_icon="🎤", layout="centered")
 
+    # Custom CSS for a more polished look
+    st.markdown("""
+        <style>
+        .main {
+            background-color: #f8f9fa;
+        }
+        .stButton>button {
+            border-radius: 20px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        .stButton>button:hover {
+            transform: scale(1.02);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .lyrics-card {
+            background-color: #ffffff;
+            padding: 2rem;
+            border-radius: 15px;
+            border-left: 5px solid #6c5ce7;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+            font-family: 'Georgia', serif;
+            font-size: 1.2rem;
+            line-height: 1.6;
+            color: #2d3436;
+            white-space: pre-wrap;
+            margin-bottom: 2rem;
+        }
+        .metric-card {
+            background-color: #ffffff;
+            padding: 1rem;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            text-align: center;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
 
     # Title
     st.title("🎤 Song Lyrics Generator")
+    st.markdown("<p style='text-align: center; color: #636e72;'>Craft professional, artist-inspired lyrics with AI-driven precision</p>", unsafe_allow_html=True)
 
     # Sidebar controls
     st.sidebar.header("⚙️ Settings")
-    
+
     model_type = "AI Agent (Local LLM + Retrieval)"
 
     # Generation parameters
-    st.sidebar.header("Generation Parameters")
-    max_words = st.sidebar.slider("Max Words", 80, 500, 120, 10)
-    temperature = st.sidebar.slider("Temperature (Creativity)", 0.5, 2.0, 1.0, 0.1)
-    top_k = st.sidebar.slider("Top-K", 5, 50, 20, 1)
+    with st.sidebar.expander("🎨 Generation Parameters", expanded=True):
+        max_words = st.slider("Max Words", 80, 500, 120, 10)
+        temperature = st.slider("Temperature (Creativity)", 0.5, 2.0, 1.0, 0.1)
 
     # Main area
+    st.markdown("### ✍️ Composition")
     theme = st.text_input("Theme", placeholder="e.g. loneliness in a big city")
+
     col1, col2 = st.columns(2)
     with col1:
         artist_style = st.text_input("Artist Style (Optional)", placeholder="e.g. Drake")
@@ -36,31 +76,32 @@ def main():
             st.warning("Please enter a theme to generate lyrics.")
             return
 
-        st.subheader("Generated Lyrics")
+        st.markdown("---")
+        st.subheader("✨ Generated Lyrics")
         lyrics_placeholder = st.empty()
 
         def stream_callback(_token, full_text):
-            lyrics_placeholder.code(full_text, language="text")
+            lyrics_placeholder.markdown(f'<div class="lyrics-card">{full_text}</div>', unsafe_allow_html=True)
 
         # Generate lyrics
         with st.spinner(f"Generating with {model_type}..."):
             try:
-                raw_lyrics, tool_logs = generate_lyrics_v2(
-                    theme, artist_style, mood, max_words, temperature, 
+                raw_lyrics, tool_logs, metrics = generate_lyrics_v2(
+                    theme, artist_style, mood, max_words, temperature,
                     stream_callback=stream_callback
                 )
                 formatted_lyrics = raw_lyrics # Agent already returns formatted text
                 # Ensure final output is written
-                lyrics_placeholder.code(formatted_lyrics, language="text")
+                lyrics_placeholder.markdown(f'<div class="lyrics-card">{formatted_lyrics}</div>', unsafe_allow_html=True)
             except Exception as e:
                 st.error(f"Error during generation: {str(e)}")
                 return
 
         # Evaluation scores
-        st.markdown("📊 Quality Metrics")
-        rhyme_score = rhyme_density(formatted_lyrics)
-        syllable_score = syllable_consistency(formatted_lyrics)
-        orig_score = originality_score(formatted_lyrics)
+        st.markdown("### 📊 Quality Metrics")
+        rhyme_score = metrics.get("rhyme_density", 0.0)
+        syllable_score = metrics.get("syllable_consistency", 0.0)
+        orig_score = metrics.get("originality_score", 0.0)
 
         m_col1, m_col2, m_col3 = st.columns(3)
         with m_col1:
@@ -79,13 +120,14 @@ def main():
                     st.divider()
 
         # Word count and model info
+        st.markdown("---")
         word_count = len(raw_lyrics.split())
-        col1, col2, col3 = st.columns(3)
-        with col1:
+        info_col1, info_col2, info_col3 = st.columns(3)
+        with info_col1:
             st.metric("Word Count", word_count)
-        with col2:
+        with info_col2:
             st.metric("Model", model_type)
-        with col3:
+        with info_col3:
             st.metric("Mood", mood)
 
 

@@ -1,39 +1,38 @@
 import os
 import pickle
+import json
 import pandas as pd
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 from huggingface_hub import login
-from pathlib import Path
-from config import DATA_PATH, INDEX_PATH, METADATA_PATH, RETRIEVAL_MODEL_NAME, HF_TOKEN
+from src.config import INDEX_PATH, METADATA_PATH, RETRIEVAL_MODEL_NAME, HF_TOKEN, CACHE_DIR
 
 class LyricsRetriever:
     def __init__(self, model_name=RETRIEVAL_MODEL_NAME):
         if HF_TOKEN:
-            login(token=HF_TOKEN)
+            try:
+                login(token=HF_TOKEN)
+            except Exception as e:
+                print(f"Warning: HuggingFace login failed: {e}")
         self.model = SentenceTransformer(model_name)
         self.index = None
         self.metadata = []
 
     def _load_lyrics_dataframe(self):
-        data_path = Path(DATA_PATH)
+        if not CACHE_DIR.exists() or not any(CACHE_DIR.glob("*.json")):
+            raise FileNotFoundError(f"No cached lyrics found in directory: {CACHE_DIR}. Please run src/fetch_lyrics.py first.")
 
-        if data_path.is_dir():
-            csv_files = sorted(
-                path for path in data_path.glob("*.csv")
-            )
+        data = []
+        for json_file in sorted(CACHE_DIR.glob("*.json")):
+            with open(json_file, 'r', encoding='utf-8') as f:
+                entry = json.load(f)
+                data.append({
+                    'Artist': entry.get('artist', ''),
+                    'Lyric': entry.get('lyrics', '')
+                })
 
-            if not csv_files:
-                raise FileNotFoundError(f"No CSV files found in directory: {DATA_PATH}")
-
-            frames = []
-            for csv_file in csv_files:
-                frames.append(pd.read_csv(csv_file))
-
-            return pd.concat(frames, ignore_index=True)
-
-        return pd.read_csv(data_path)
+        return pd.DataFrame(data)
 
     def build_index(self):
         """Load lyrics, chunk them, embed, and save FAISS index."""
@@ -50,9 +49,8 @@ class LyricsRetriever:
             artist = str(artist).strip()
             lyric = str(row['Lyric'])
 
-            # Split by <NEWLINE> or common line breaks if present
-            # Based on dataset.py, <NEWLINE> is used as a separator
-            lines = lyric.split(" <NEWLINE> ")
+            # Split by standard newlines or <NEWLINE> tags
+            lines = lyric.replace(" <NEWLINE> ", "\n").split("\n")
 
             # For very long lines, we could further split by commas or periods,
             # but for lyrics, line-by-line is usually a good unit.

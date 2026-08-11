@@ -19,5 +19,11 @@ class TestConfig(unittest.TestCase):
         self.assertTrue(str(BASE_DIR) in INDEX_PATH)
         self.assertTrue(str(BASE_DIR) in METADATA_PATH)
 
+    def test_fallback_base_url_default(self):
+        """Test that FALLBACK_BASE_URL defaults correctly for Groq"""
+        from config import FALLBACK_PROVIDER, FALLBACK_BASE_URL
+        if FALLBACK_PROVIDER.lower() == "groq":
+            self.assertEqual(FALLBACK_BASE_URL, "https://api.groq.com/openai/v1")
+
 if __name__ == '__main__':
     unittest.main()
