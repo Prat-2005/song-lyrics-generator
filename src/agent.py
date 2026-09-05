@@ -1,173 +1,85 @@
-import requests
+"""
+Lyrics generation.
+
+Design notes (read this before you "improve" it again):
+
+- There is NO agent loop and NO tool-calling here on purpose. Retrieval
+  (get_similar_lines) and rhyme lookups are things WE decide to do in Python,
+  not things the model needs to be given as a "tool" and asked to call. That
+  removes an entire class of bugs: malformed tool-call JSON, models leaking
+  <tools> tags into the output, multi-round tool negotiation, etc.
+
+- There is at most ONE revision pass, and it only happens if the metrics
+  (rhyme density / syllable consistency / originality) actually fall short
+  of target. We check that in code. We never ask the model to grade its own
+  work and decide when to stop — that's slow and unreliable.
+
+- Local model first, cloud fallback second. If both fail, we return a clear
+  error string instead of silently returning None / crashing.
+"""
+
 import json
-import time
 import re
+import time
+
+import requests
 from openai import OpenAI
-from src.tools import TOOL_SCHEMAS, TOOL_FUNCTIONS, get_similar_lines, count_syllables, get_rhymes
-from src.config import LOCAL_URL, LOCAL_MODEL, LOCAL_PROVIDER, MODEL_TIMEOUT, FALLBACK_PROVIDER, FALLBACK_MODEL, FALLBACK_API_KEY, FALLBACK_BASE_URL
+
+from src.config import (
+    LOCAL_URL, LOCAL_MODEL, LOCAL_PROVIDER, MODEL_TIMEOUT,
+    FALLBACK_PROVIDER, FALLBACK_MODEL, FALLBACK_API_KEY, FALLBACK_BASE_URL,
+)
 from src.evaluate import rhyme_density, syllable_consistency, originality_score
+from src.tools import get_similar_lines
 
 _fallback_client = None
 
-
-def parse_tool_arguments(args):
-    """Normalize tool arguments from provider-specific formats into a dict."""
-    if isinstance(args, dict):
-        return args
-    if isinstance(args, str):
-        try:
-            parsed = json.loads(args)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
-    return {}
+# Quality bars that decide (in code) whether a revision pass is worth doing.
+TARGETS = {
+    "rhyme_density": 0.30,
+    "syllable_consistency": 0.70,
+    "originality_score": 0.80,
+}
 
 
-def sanitize_lyrics_output(text):
-    """Remove tool call JSON snippets, <tools> tags, and markdown code wrappers from lyrics."""
+def _strip_formatting(text):
+    """Light cleanup only — strip a wrapping markdown code fence if present.
+    There's no tool-JSON to scrub anymore because the model is never given
+    tools to call, so this doesn't need to be a regex minefield."""
     if not text:
         return ""
-
-    # Remove <tools>...</tools> tags
-    text = re.sub(r'<tools>.*?</tools>', '', text, flags=re.DOTALL)
-
-    # Remove markdown code blocks containing tool JSON
-    text = re.sub(r'```(?:json)?\s*\{\s*"name"\s*:.*?\}\s*```', '', text, flags=re.DOTALL)
-
-    # Remove raw {"name": ...} lines/blocks
-    text = re.sub(r'\{\s*"name"\s*:\s*"[^"]+".*?\}', '', text, flags=re.DOTALL)
-
-    # Filter out standalone tags or backtick fences
-    lines = [
-        line for line in text.splitlines() 
-        if not line.strip().startswith('```') 
-        and line.strip() not in ('<tools>', '</tools>')
-    ]
-    return "\n".join(lines).strip()
+    text = text.strip()
+    text = re.sub(r'^```[a-zA-Z]*\n?', '', text)
+    text = re.sub(r'\n?```$', '', text)
+    return text.strip()
 
 
-def normalize_tool_calls(response):
-    """Ensure tool calls are in the 'tool_calls' list, even if provided as text."""
-    if not response: return response
-    if response.get("tool_calls"): return response
-
-    content = (response.get("content") or "").strip()
-    matches = re.findall(r'(\{\s*"name"\s*:\s*"[^"]+".*?\})', content, re.DOTALL)
-    extracted_calls = []
-    for match in matches:
-        try:
-            parsed = json.loads(match)
-            if isinstance(parsed, dict) and "name" in parsed:
-                extracted_calls.append({"id": f"call_{int(time.time())}", "function": parsed})
-        except Exception:
-            pass
-
-    if extracted_calls:
-        response["tool_calls"] = extracted_calls
-
-    return response
-
-def execute_tool_call(func_name, args):
-    """Execute one tool call safely and return a serializable result."""
-    if func_name not in TOOL_FUNCTIONS:
-        return f"Error: unknown tool '{func_name}'."
-    if not isinstance(args, dict):
-        return f"Error: args must be a dictionary, got {type(args)}"
-
-    try:
-        return TOOL_FUNCTIONS[func_name](**args)
-    except Exception as e:
-        return f"Error executing tool '{func_name}': {e}"
-
-
-def resolve_response_with_tools(messages, temperature, tool_logs, max_rounds=4):
-    """Run the model and resolve tool calls across multiple rounds."""
-    response = call_local_llm(messages, tools=TOOL_SCHEMAS, temperature=temperature)
-    if not response:
-        return None
-
-    response = normalize_tool_calls(response)
-    seen_calls = set()
-
-    for _ in range(max_rounds):
-        tool_calls = response.get("tool_calls") or []
-        if not tool_calls:
-            return response
-
-        messages.append(response)
-        executed_any = False
-
-        for tool_call in tool_calls:
-            if not isinstance(tool_call, dict) or not isinstance(tool_call.get("function"), dict):
-                continue
-
-            func_name = tool_call["function"].get("name")
-            args = parse_tool_arguments(tool_call["function"].get("arguments", {}))
-
-            # Break repetitive tool loops where the model keeps requesting the same call.
-            call_key = (func_name, json.dumps(args, sort_keys=True, ensure_ascii=True))
-            if call_key in seen_calls:
-                messages.append({
-                    "role": "user",
-                    "content": "You already called that same tool with identical arguments. Stop calling tools and provide plain text output only."
-                })
-                continue
-            seen_calls.add(call_key)
-
-            print(f"Calling tool: {func_name}({args})")
-            result = execute_tool_call(func_name, args)
-            tool_logs.append({"tool": func_name, "args": args, "result": result})
-            executed_any = True
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.get("id"),
-                "content": str(result),
-                "name": func_name
-            })
-
-        if not executed_any:
-            messages.append({
-                "role": "user",
-                "content": "Tool call payload was invalid. Continue without tools and return plain text only."
-            })
-
-        response = call_local_llm(messages, tools=TOOL_SCHEMAS, temperature=temperature)
-        if not response:
-            return None
-        response = normalize_tool_calls(response)
-
-    return response
-
-
-def get_fallback_client():
+def _get_fallback_client():
     global _fallback_client
-    if not _fallback_client:
-        client_kwargs = {"api_key": FALLBACK_API_KEY}
+    if _fallback_client is None:
+        kwargs = {"api_key": FALLBACK_API_KEY}
         if FALLBACK_BASE_URL:
-            client_kwargs["base_url"] = FALLBACK_BASE_URL
-        _fallback_client = OpenAI(**client_kwargs)
+            kwargs["base_url"] = FALLBACK_BASE_URL
+        _fallback_client = OpenAI(**kwargs)
     return _fallback_client
 
-def call_fallback_llm(messages, tools=None, temperature=1.0, stream_callback=None):
-    if not FALLBACK_API_KEY:
-        print("Fallback LLM error: API key is not set. Please set FALLBACK_API_KEY.")
-        return None
 
-    client = get_fallback_client()
-    
-    # Map tools to OpenAI format if provided
-    formatted_tools = tools if tools else None
+def _call_fallback(messages, temperature, stream_callback=None):
+    """Returns (text, error). Exactly one of them is set."""
+    if not FALLBACK_API_KEY:
+        return None, (
+            "Local model unreachable AND no fallback configured "
+            "(FALLBACK_API_KEY is missing in .env)."
+        )
 
     try:
+        client = _get_fallback_client()
         response = client.chat.completions.create(
             model=FALLBACK_MODEL,
             messages=messages,
             temperature=temperature,
-            tools=formatted_tools,
-            stream=bool(stream_callback)
+            stream=bool(stream_callback),
         )
-        
         if stream_callback:
             full_content = ""
             for chunk in response:
@@ -175,192 +87,168 @@ def call_fallback_llm(messages, tools=None, temperature=1.0, stream_callback=Non
                 if delta.content:
                     full_content += delta.content
                     stream_callback(delta.content, full_content)
-            # We don't support streaming tool calls in this basic implementation
-            # Groq currently doesn't stream tool calls well anyway
-            return {"role": "assistant", "content": full_content}
-        else:
-            msg = response.choices[0].message
-            result = {"role": "assistant", "content": msg.content or ""}
-            if msg.tool_calls:
-                result["tool_calls"] = [
-                    {"id": t.id, "function": {"name": t.function.name, "arguments": t.function.arguments}}
-                    for t in msg.tool_calls
-                ]
-            return result
+            return full_content, None
+        return response.choices[0].message.content or "", None
     except Exception as e:
-        print(f"Fallback LLM error: {e}")
-        return None
+        return None, f"Fallback LLM ({FALLBACK_PROVIDER}) also failed: {e}"
 
-def call_local_llm(messages, tools=None, temperature=1.0, stream_callback=None):
-    """Call local model with tool support."""
+
+def call_llm(messages, temperature=1.0, stream_callback=None):
+    """Call the local model; fall back to the cloud model if it's unreachable.
+    Returns (text, error) — exactly one of them is set."""
     payload = {
         "provider": LOCAL_PROVIDER,
         "model": LOCAL_MODEL,
         "messages": messages,
         "stream": bool(stream_callback),
-        "options": {"temperature": temperature}
+        "options": {"temperature": temperature},
     }
 
-    if tools:
-        payload["tools"] = tools
-
     try:
-        response = requests.post(LOCAL_URL, json=payload, timeout=MODEL_TIMEOUT, stream=bool(stream_callback))
+        response = requests.post(
+            LOCAL_URL, json=payload, timeout=MODEL_TIMEOUT, stream=bool(stream_callback)
+        )
         response.raise_for_status()
-        
+
         if stream_callback:
             full_content = ""
             for line in response.iter_lines():
-                if line:
-                    chunk = json.loads(line)
-                    if "message" in chunk and "content" in chunk["message"]:
-                        content = chunk["message"]["content"]
-                        full_content += content
-                        stream_callback(content, full_content)
-            return {"role": "assistant", "content": full_content}
-        else:
-            return response.json()["message"]
-            
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                content = chunk.get("message", {}).get("content", "")
+                if content:
+                    full_content += content
+                    stream_callback(content, full_content)
+            return full_content, None
+
+        return response.json()["message"]["content"], None
+
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-        print(f"Local LLM failed/timed out: {e}. Switching to fallback ({FALLBACK_PROVIDER})...")
-        return call_fallback_llm(messages, tools, temperature, stream_callback)
+        print(f"Local model unreachable ({e}). Falling back to {FALLBACK_PROVIDER}...")
+        return _call_fallback(messages, temperature, stream_callback)
     except Exception as e:
-        print(f"Unexpected error calling Local LLM: {e}")
-        return call_fallback_llm(messages, tools, temperature, stream_callback)
+        print(f"Local model error ({e}). Falling back to {FALLBACK_PROVIDER}...")
+        return _call_fallback(messages, temperature, stream_callback)
 
-def generate_lyrics_v2(theme, artist_style=None, mood="emotional", max_words=120, temperature=1.0, stream_callback=None):
-    """Generate lyrics using a draft -> critique -> revise loop with tools."""
 
-    # 1. Initial Context Retrieval
-    print(f"Retrieving context for theme: {theme}...")
-    similar_lines = get_similar_lines(theme, artist=artist_style, k=10)
-    context_str = "\n".join([f"- {l}" for l in similar_lines])
+def _build_prompt(theme, artist_style, mood, max_words, context_lines):
+    context_str = "\n".join(f"- {l}" for l in context_lines) or "(no reference lines found)"
 
     system_prompt = (
-        "You are a world-class songwriter and lyrical architect. Your goal is to write lyrics that "
-        f"perfectly capture the essence of {artist_style if artist_style else 'a versatile artist'}. "
-        "You do not just write; you engineer lyrics for maximum emotional impact, rhyme precision, and rhythmic flow. "
-        "\n\nCORE GUIDELINES:\n"
-        "1. STYLE & TONE MATCHING: Use `get_similar_lines` to analyze the provided artist's vocabulary, linguistic quirks, slang, "
-        "and thematic patterns. ABSOLUTELY AVOID 'CLEAN', GENERIC, OR AI-LIKE LANGUAGE. Embrace the artist's specific dialect, "
-        "emotional cadence, and stylistic imperfections (e.g., fragmented lines, colloquialisms, conversational ad-libs, or specific repetitions). "
-        "Emulate the 'soul' and 'voice' of their writing—if they are gritty, be gritty; if they are melodic and poetic, be that. "
-        "The lyrics should feel like they were written by the artist, not an AI simulating an artist.\n"
-        "2. RHYME & METER: Use `get_rhymes` to find sophisticated end-rhymes. Ensure the meter (syllable count per line) "
-        "is consistent and intentional, matching the artist's typical flow and rhythmic delivery.\n"
-        "3. AUTHENTICITY: Avoid clichés. If a line feels generic, use retrieval to find a more unique angle that fits the artist's persona.\n"
-        "4. ITERATION: You will be critiqued based on programmatic metrics (Rhyme Density, Syllable Consistency, Originality), "
-        "stylistic authenticity, and length. Your goal is to satisfy these constraints before finalizing your draft.\n"
-        "5. TOOLS: If you want to use a tool (e.g. get_rhymes), use the tool calling API provided. DO NOT output the tool call JSON in your text response.\n"
-        "6. FORMAT: OUTPUT YOUR FINAL LYRICS IN PLAIN TEXT ONLY. DO NOT OUTPUT JSON. DO NOT WRAP IN MARKDOWN CODE BLOCKS. NO FORMATTING OTHER THAN NEWLINES."
+        "You are a skilled songwriter. Write lyrics that sound like a real song, "
+        f"in the voice of {artist_style or 'a versatile modern artist'} — not like "
+        "an AI describing one.\n\n"
+        "GUIDELINES:\n"
+        "1. Match the vocabulary, slang, and emotional tone in the reference lines "
+        "below. Avoid generic, overly clean, or AI-sounding language.\n"
+        "2. Rhyme with intent — end most lines on words that genuinely rhyme with "
+        "a nearby line.\n"
+        "3. Keep syllable count per line fairly consistent so it could actually be sung.\n"
+        "4. Avoid clichés — if a line feels generic, make it more specific and personal.\n"
+        "5. Output ONLY the finished lyrics in plain text. No JSON, no markdown, "
+        "no explanations. Simple section labels like [Verse 1] or [Chorus] are fine."
     )
 
     user_prompt = (
-        f"Theme: {theme}\nMood: {mood}\n"
-        f"Artist Style: {artist_style if artist_style else 'Generic'}\n\n"
-        f"Reference lines from the dataset:\n{context_str}\n\n"
-        f"Please write a full song structure (including Verses and a Chorus) with approximately {max_words} words. "
-        "Ensure the content is substantial and fully explores the theme. Output the lyrics in plain text only."
+        f"Theme: {theme}\n"
+        f"Mood: {mood}\n"
+        f"Artist style: {artist_style or 'Generic'}\n\n"
+        "Reference lines from real songs in this style (for tone/vocabulary only — "
+        f"don't copy them):\n{context_str}\n\n"
+        f"Write a full song (verses + chorus) of about {max_words} words."
     )
 
-    messages = [
+    return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
+        {"role": "user", "content": user_prompt},
     ]
 
-    # Loop for Draft -> Critique -> Revise
-    max_revisions = 3
-    current_lyrics = ""
-    tool_logs = []
 
-    for i in range(max_revisions):
-        print(f"Iteration {i+1}...")
-        
-        # Generate/Regenerate and resolve tool calls before consuming text output.
-        response = resolve_response_with_tools(messages, temperature, tool_logs)
-        if not response:
-            return "Error: Could not connect to LLM.", [], {}
+def _metrics_for(lyrics):
+    return {
+        "rhyme_density": rhyme_density(lyrics),
+        "syllable_consistency": syllable_consistency(lyrics),
+        "originality_score": originality_score(lyrics),
+    }
 
-        current_lyrics = response["content"]
-        messages.append({"role": "assistant", "content": current_lyrics})
 
-        # Critique using tools and metrics
-        print("Critiquing draft...")
-        
-        # Don't stream the critique to the UI to keep it clean, or stream it to a different element?
-        # Actually, let's keep it clean and only stream the generation.
-        # But for now, we won't pass stream_callback to the critique step.
+def _passes_targets(metrics):
+    return all(metrics.get(k, 0.0) >= target for k, target in TARGETS.items())
 
-        # Per-line syllable analysis
-        syllables_per_line = count_syllables(current_lyrics)
-        if isinstance(syllables_per_line, list):
-            syllable_report = "\n".join([
-                f"Line {i+1}: {s} syllables" 
-                for i, s in enumerate(syllables_per_line)
-            ])  
+
+def _build_revision_prompt(lyrics, metrics, max_words):
+    word_count = len(lyrics.split())
+    return (
+        f"Here is the current draft:\n{lyrics}\n\n"
+        "--- METRICS (target in brackets) ---\n"
+        f"Rhyme density: {metrics['rhyme_density']:.0%} "
+        f"[target >{TARGETS['rhyme_density']:.0%}]\n"
+        f"Syllable consistency: {metrics['syllable_consistency']:.0%} "
+        f"[target >{TARGETS['syllable_consistency']:.0%}]\n"
+        f"Originality: {metrics['originality_score']:.0%} "
+        f"[target >{TARGETS['originality_score']:.0%}]\n"
+        f"Length: {word_count} words [target ~{max_words}]\n\n"
+        "Revise the lyrics to close the gap on whichever metrics are below "
+        "target, while keeping the theme and style. Output ONLY the revised "
+        "lyrics in plain text."
+    )
+
+
+def generate_lyrics(theme, artist_style=None, mood="emotional", max_words=120,
+                     temperature=1.0, stream_callback=None):
+    """
+    Single-pass generation with retrieval baked into the prompt, plus at most
+    one revision pass — only if the metrics actually fall short of target.
+
+    Returns (lyrics, generation_log, metrics). On failure, lyrics starts with
+    "Error:" — callers should check for that rather than assuming success.
+    """
+    generation_log = []
+
+    # Retrieval happens directly in Python, before we ever talk to the model.
+    context_lines = get_similar_lines(theme, artist=artist_style, k=10)
+    generation_log.append({
+        "step": "Retrieval",
+        "info": f"Pulled {len(context_lines)} reference lines for '{theme}'"
+                + (f" ({artist_style} style)" if artist_style else ""),
+    })
+
+    messages = _build_prompt(theme, artist_style, mood, max_words, context_lines)
+
+    lyrics, error = call_llm(messages, temperature=temperature, stream_callback=stream_callback)
+    if error:
+        return f"Error: {error}", generation_log, {}
+
+    lyrics = _strip_formatting(lyrics)
+    generation_log.append({"step": "Draft", "info": f"{len(lyrics.split())} words generated"})
+
+    metrics = _metrics_for(lyrics)
+    did_revise = False
+
+    if not _passes_targets(metrics):
+        messages.append({"role": "assistant", "content": lyrics})
+        messages.append({"role": "user", "content": _build_revision_prompt(lyrics, metrics, max_words)})
+
+        revised, error = call_llm(messages, temperature=temperature)
+        if not error and revised and revised.strip():
+            lyrics = _strip_formatting(revised)
+            metrics = _metrics_for(lyrics)
+            did_revise = True
+            generation_log.append({"step": "Revision", "info": "Applied one revision pass to close metric gaps"})
         else:
-            syllable_report = f"Total: {syllables_per_line}"
+            generation_log.append({"step": "Revision", "info": f"Skipped ({error or 'empty response'})"})
+    else:
+        generation_log.append({"step": "Revision", "info": "Not needed — draft already met all quality targets"})
 
-        # High-level quality metrics
-        rd = rhyme_density(current_lyrics)
-        sc = syllable_consistency(current_lyrics)
-        os = originality_score(current_lyrics)
-        current_word_count = len(current_lyrics.split())
-
-        critique_prompt = (
-            f"Here is the current draft:\n{current_lyrics}\n\n"
-            f"--- METRIC ANALYSIS ---\n"
-            f"Rhyme Density: {rd:.2%} (Target: >30%)\n"
-            f"Syllable Consistency: {sc:.2%} (Target: >70%)\n"
-            f"Originality Score: {os:.2%} (Target: >80%)\n"
-            f"Current Length: {current_word_count} words (Target: ~{max_words} words)\n\n"
-            f"--- METER ANALYSIS ---\n"
-            f"{syllable_report}\n\n"
-            f"--- TONE ANALYSIS ---\n"
-            f"Artist Style Target: {artist_style if artist_style else 'Generic'}\n\n"
-            "Analyze these metrics and the artist's tone. If the rhyme is weak, the meter is inconsistent, "
-            "the lyrics are significantly shorter than the target length, or the artist's voice (slang, cadence, soul) is missing, "
-            "suggest a specific line-by-line revision to make it more substantial and authentic. "
-            "If the draft meets all targets (including length) and feels authentic to the artist, respond with 'FINAL'."
-        )
-
-        critique_messages = [{"role": "user", "content": critique_prompt}]
-        critique_res = call_local_llm(critique_messages, tools=None, temperature=temperature)
-        if not critique_res or "FINAL" in critique_res["content"].upper():
-            print("Draft finalized.")
-            break
-
-        print(f"Critique: {critique_res['content']}")
-        messages.append({"role": "user", "content": f"Critique: {critique_res['content']}\nPlease revise the lyrics based on this critique. Output ONLY the revised lyrics in plain text. Do NOT use JSON, markdown blocks, or tool calls. Just output the lyrics directly as plain text."})
-
-    # Final Guard: Sanitize output and ensure it is not JSON or empty
-    current_lyrics = sanitize_lyrics_output(current_lyrics)
-
-    if not current_lyrics or current_lyrics.startswith("{"):
-        repair_messages = messages + [{
-            "role": "user",
-            "content": "Your last response contained tool JSON or tags. Please provide ONLY the final song lyrics as plain text. Do NOT include JSON, code blocks, or tool calls."
-        }]
-        repaired = call_local_llm(repair_messages, tools=None, temperature=min(temperature, 1.0))
-        if repaired:
-            current_lyrics = sanitize_lyrics_output(repaired.get("content", current_lyrics))
-
-    # Final cleanup and streaming step
-    if stream_callback:
-        print("Streaming final polished lyrics to UI...")
+    # The draft was already streamed live. If we revised afterward, stream the
+    # final version too so the UI doesn't end up showing the pre-revision draft.
+    if stream_callback and did_revise:
         full_content = ""
-        chunk_size = 3
-        for i in range(0, len(current_lyrics), chunk_size):
-            chunk = current_lyrics[i:i+chunk_size]
+        for i in range(0, len(lyrics), 3):
+            chunk = lyrics[i:i + 3]
             full_content += chunk
             stream_callback(chunk, full_content)
             time.sleep(0.02)
 
-    # Calculate final metrics
-    metrics = {
-        "rhyme_density": rhyme_density(current_lyrics),
-        "syllable_consistency": syllable_consistency(current_lyrics),
-        "originality_score": originality_score(current_lyrics),
-    }
-
-    return current_lyrics, tool_logs, metrics
+    return lyrics, generation_log, metrics

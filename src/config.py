@@ -8,22 +8,24 @@ load_dotenv()
 # --- Project Paths ---
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-CACHE_DIR = BASE_DIR / "cache"
 MODELS_DIR = BASE_DIR / "models"
 
-# Ensure directories exist
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+# DATA_PATH points at the directory of artist lyric CSVs — this IS the
+# dataset. There used to also be a separate cache/ directory of one-JSON-
+# per-song files that the retriever read from instead; that's gone. The
+# retriever now reads these CSVs directly, and scripts/fetch_lyrics.py
+# appends newly-fetched songs straight into them.
 DATA_PATH = os.getenv("DATA_PATH", str(DATA_DIR))
 if not Path(DATA_PATH).is_absolute():
     DATA_PATH = str(BASE_DIR / DATA_PATH)
 
-INDEX_PATH = os.getenv("INDEX_PATH")
+INDEX_PATH = os.getenv("INDEX_PATH", str(MODELS_DIR / "faiss_index.bin"))
 if not Path(INDEX_PATH).is_absolute():
     INDEX_PATH = str(BASE_DIR / INDEX_PATH)
 
-METADATA_PATH = os.getenv("METADATA_PATH")
+METADATA_PATH = os.getenv("METADATA_PATH", str(MODELS_DIR / "metadata.pkl"))
 if not Path(METADATA_PATH).is_absolute():
     METADATA_PATH = str(BASE_DIR / METADATA_PATH)
 
@@ -42,6 +44,7 @@ FALLBACK_BASE_URL = os.getenv("FALLBACK_BASE_URL", "https://api.groq.com/openai/
 # --- Retrieval Settings ---
 RETRIEVAL_MODEL_NAME = os.getenv("RETRIEVAL_MODEL_NAME", "all-MiniLM-L6-v2")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
+
 
 def validate_config():
     """Basic check to ensure critical paths exist or are configured."""

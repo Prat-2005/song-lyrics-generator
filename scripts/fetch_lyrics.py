@@ -1,86 +1,80 @@
-import json
-import requests
-import logging
-from pathlib import Path
-from src.config import CACHE_DIR
-from typing import Optional
+"""
+Fetch a song's lyrics from LRCLIB and append it to the matching artist CSV
+in data/.
 
-# Setup logging
+There's no cache/ directory anymore. The CSVs in data/ are the dataset —
+this script writes new songs straight into them instead of stashing a
+separate JSON file per song that the retriever then had to know to read.
+"""
+
+import logging
+import sys
+from pathlib import Path
+
+import pandas as pd
+import requests
+
+from src.config import DATA_PATH
+
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-def get_cache_path(artist: str, track: str) -> Path:
-    """Generate a safe filename for the cache, ensuring cache directory exists."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    safe_artist = "".join(c for c in artist if c.isalnum()).strip().replace(' ', '_')
-    safe_track = "".join(c for c in track if c.isalnum()).strip().replace(' ', '_')
-    return CACHE_DIR / f"{safe_artist}_{safe_track}.json"
 
-def fetch_lrclib(artist: str, track: str) -> Optional[str]:
-
-    """Fetch lyrics from LRCLIB API."""
-    # Try /api/get first for exact match
-    url = "https://lrclib.net/api/get"
-    params = {
-        "artist_name": artist,
-        "track_name": track
-    }
+def fetch_lrclib(artist: str, track: str):
+    """Fetch plain lyrics for a track from LRCLIB. Returns None if not found."""
+    params = {"artist_name": artist, "track_name": track}
 
     try:
-        response = requests.get(url, params=params, timeout=10)
-
+        response = requests.get("https://lrclib.net/api/get", params=params, timeout=10)
         if response.status_code == 200:
-            data = response.json()
-            lyrics = data.get("plainLyrics")
-
-        cache_path = get_cache_path(artist, track)
-            
-        if lyrics:
-            with open(cache_path, 'w', encoding='utf-8') as cache_f:
-                json.dump({
-                    "artist": artist,
-                    "track": track,
-                    "lyrics": lyrics,
-                    "source": "lrclib"
-              }, cache_f)
-                                                    
-            logger.info(f"Fetched {track} from lrclib")
-            return lyrics
-            
+            lyrics = response.json().get("plainLyrics")
+            if lyrics:
+                logger.info(f"Fetched '{track}' by {artist} from LRCLIB (exact match)")
+                return lyrics
     except Exception as e:
-        logger.debug(f"LRCLIB get error for {artist} - {track}: {e}")
-
-    # Fallback to /api/search if get fails
-    search_url = "https://lrclib.net/api/search"
+        logger.debug(f"LRCLIB exact-match lookup failed for {artist} - {track}: {e}")
 
     try:
-        response = requests.get(search_url, params=params, timeout=10)
-
+        response = requests.get("https://lrclib.net/api/search", params=params, timeout=10)
         if response.status_code == 200:
             results = response.json()
-
-            if results and len(results) > 0:
-                # Return the first match
+            if results:
                 lyrics = results[0].get("plainLyrics")
-
-                cache_path = get_cache_path(artist, track)
-
                 if lyrics:
-                    with open(cache_path, 'w', encoding='utf-8') as cache_f:
-                        json.dump({
-                            "artist": artist,
-                            "track": track,
-                            "lyrics": lyrics,
-                            "source": "lrclib"
-                       }, cache_f)
-                                        
-                    logger.info(f"Fetched {track} from lrclib")
+                    logger.info(f"Fetched '{track}' by {artist} from LRCLIB (search match)")
                     return lyrics
-                
-                else:
-                    logger.warning(f"No lyrics found in search results for {track}")
-                
     except Exception as e:
-        logger.debug(f"LRCLIB search error for {artist} - {track}: {e}")
+        logger.debug(f"LRCLIB search lookup failed for {artist} - {track}: {e}")
 
+    logger.warning(f"No lyrics found for '{track}' by {artist}")
     return None
+
+
+def append_to_csv(artist: str, title: str, lyrics: str):
+    """Append a fetched song to that artist's CSV in DATA_PATH, creating it if needed."""
+    csv_path = Path(DATA_PATH) / f"{artist.replace(' ', '')}.csv"
+    row = pd.DataFrame([{"Artist": artist, "Title": title, "Lyric": lyrics}])
+
+    if csv_path.exists():
+        existing = pd.read_csv(csv_path)
+        combined = pd.concat([existing, row], ignore_index=True)
+    else:
+        combined = row
+
+    combined.to_csv(csv_path, index=False)
+    logger.info(f"Saved '{title}' to {csv_path}")
+
+
+def main(artist: str, track: str):
+    lyrics = fetch_lrclib(artist, track)
+    if lyrics:
+        append_to_csv(artist, track, lyrics)
+    else:
+        logger.warning("Nothing saved — no lyrics found.")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python -m scripts.fetch_lyrics <artist> <track>")
+        sys.exit(1)
+    main(sys.argv[1], sys.argv[2])

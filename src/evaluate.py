@@ -1,15 +1,7 @@
 import numpy as np
-from src.retrieval import LyricsRetriever
-from src.tools import get_rhymes, count_syllables
 
-# Shared retriever instance to avoid reloading model and index on every call
-_shared_retriever = None
+from src.tools import get_rhymes, count_syllables, get_shared_retriever
 
-def get_retriever():
-    global _shared_retriever
-    if _shared_retriever is None:
-        _shared_retriever = LyricsRetriever()
-    return _shared_retriever
 
 def rhyme_density(text: str) -> float:
     """
@@ -23,12 +15,14 @@ def rhyme_density(text: str) -> float:
     rhyme_pairs = 0
     for i in range(len(lines) - 1):
         words_i = lines[i].split()
-        if not words_i: continue
+        if not words_i:
+            continue
         last_word_i = words_i[-1].strip('.,!?()').lower()
 
         for j in range(i + 1, len(lines)):
             words_j = lines[j].split()
-            if not words_j: continue
+            if not words_j:
+                continue
             last_word_j = words_j[-1].strip('.,!?()').lower()
 
             if last_word_j in get_rhymes(last_word_i):
@@ -36,6 +30,7 @@ def rhyme_density(text: str) -> float:
                 break
 
     return rhyme_pairs / (len(lines) - 1)
+
 
 def syllable_consistency(text: str) -> float:
     """
@@ -55,18 +50,18 @@ def syllable_consistency(text: str) -> float:
     cv = std_dev / mean_syll
     return 1.0 / (1.0 + cv)
 
+
 def originality_score(generated_text: str) -> float:
     """
     Compare generated lines against the corpus.
     Returns (1.0 - max_similarity).
     """
-    retriever = get_retriever()
+    retriever = get_shared_retriever()
 
     lines = [line.strip() for line in generated_text.split('\n') if line.strip()]
     if not lines:
         return 1.0
 
-    # Ensure index is loaded
     if retriever.index is None:
         retriever.load_index()
 
@@ -75,12 +70,8 @@ def originality_score(generated_text: str) -> float:
     max_sim = 0.0
     for emb in gen_embeddings:
         norm_emb = emb / np.linalg.norm(emb)
-
-        # Search the index
         dist, _ = retriever.index.search(norm_emb.reshape(1, -1), 1)
-
-        # Since the index is IndexFlatIP and vectors are normalized,
-        # the distance returned is the cosine similarity.
+        # IndexFlatIP with normalized vectors returns cosine similarity directly.
         sim = dist[0][0]
         max_sim = max(max_sim, sim)
 

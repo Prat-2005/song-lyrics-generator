@@ -1,74 +1,75 @@
-import pytest
-from unittest.mock import patch, MagicMock
-from src.agent import execute_tool_call, resolve_response_with_tools, generate_lyrics_v2, sanitize_lyrics_output
+from unittest.mock import patch
 
-def test_sanitize_lyrics_output():
-    raw_text = '<tools></tools>\n{"name": "get_similar_lines", "arguments": "{\\"query\\": \\"test\\"}"}\n```json\n{"name": "check_sentiment"}\n```\nHere are the real lyrics line 1\nHere are the real lyrics line 2'
-    cleaned = sanitize_lyrics_output(raw_text)
-    assert "Here are the real lyrics line 1" in cleaned
-    assert "get_similar_lines" not in cleaned
-    assert "<tools>" not in cleaned
+from src.agent import generate_lyrics, _strip_formatting, _passes_targets, TARGETS
 
-def test_execute_tool_call_success():
-    # Mock a simple tool function
-    mock_func = MagicMock(return_value="Tool Result")
-    with patch('src.agent.TOOL_FUNCTIONS', {"my_tool": mock_func}):
-        result = execute_tool_call("my_tool", {"arg1": "val1"})
-        assert result == "Tool Result"
-        mock_func.assert_called_with(arg1="val1")
 
-def test_execute_tool_call_unknown():
-    with patch('src.agent.TOOL_FUNCTIONS', {}):
-        result = execute_tool_call("unknown", {})
-        assert "Error: unknown tool" in result
+def test_strip_formatting_removes_code_fence():
+    raw = "```\nHere are the lyrics\nline two\n```"
+    assert _strip_formatting(raw) == "Here are the lyrics\nline two"
 
-def test_execute_tool_call_bad_args():
-    mock_func = MagicMock()
-    with patch('src.agent.TOOL_FUNCTIONS', {"my_tool": mock_func}):
-        result = execute_tool_call("my_tool", "not a dict")
-        assert "Error: args must be a dictionary" in result
 
-@patch('src.agent.call_local_llm')
-def test_resolve_response_with_tools_no_tools(mock_llm):
-    mock_llm.return_value = {"role": "assistant", "content": "Plain text response"}
+def test_strip_formatting_handles_empty():
+    assert _strip_formatting("") == ""
+    assert _strip_formatting(None) == ""
 
-    messages = [{"role": "user", "content": "Hello"}]
-    tool_logs = []
-    response = resolve_response_with_tools(messages, 1.0, tool_logs)
 
-    assert response["content"] == "Plain text response"
-    assert len(tool_logs) == 0
+def test_passes_targets_true_when_all_met():
+    metrics = {k: v + 0.1 for k, v in TARGETS.items()}
+    assert _passes_targets(metrics)
 
-@patch('src.agent.call_local_llm')
-@patch('src.agent.execute_tool_call')
-def test_resolve_response_with_tools_with_tool(mock_execute, mock_llm):
-    # 1st call: LLM wants to call a tool
-    # 2nd call: LLM finishes after seeing tool result
-    mock_llm.side_effect = [
-        {"role": "assistant", "tool_calls": [{"function": {"name": "get_rhymes", "arguments": {"word": "blue"}}}]},
-        {"role": "assistant", "content": "Rhymes with blue are true and new."}
-    ]
-    mock_execute.return_value = ["true", "new"]
 
-    messages = [{"role": "user", "content": "What rhymes with blue?"}]
-    tool_logs = []
-    response = resolve_response_with_tools(messages, 1.0, tool_logs)
+def test_passes_targets_false_when_one_missed():
+    metrics = {k: v + 0.1 for k, v in TARGETS.items()}
+    metrics["rhyme_density"] = 0.0
+    assert not _passes_targets(metrics)
 
-    assert response["content"] == "Rhymes with blue are true and new."
-    assert len(tool_logs) == 1
-    assert tool_logs[0]["tool"] == "get_rhymes"
 
-@patch('src.agent.resolve_response_with_tools')
-@patch('src.agent.call_local_llm')
-@patch('src.agent.get_similar_lines')
-def test_generate_lyrics_v2_flow(mock_similar, mock_llm, mock_resolve):
+@patch("src.agent.get_similar_lines")
+@patch("src.agent.call_llm")
+@patch("src.agent._metrics_for")
+def test_generate_lyrics_no_revision_when_targets_met(mock_metrics, mock_llm, mock_similar):
     mock_similar.return_value = ["Line 1", "Line 2"]
-    mock_resolve.return_value = {"role": "assistant", "content": "Generated lyrics"}
-    # Mock critique to say FINAL immediately
-    mock_llm.return_value = {"role": "assistant", "content": "FINAL"}
+    mock_llm.return_value = ("Generated lyrics", None)
+    mock_metrics.return_value = {k: v + 0.1 for k, v in TARGETS.items()}
 
-    lyrics, logs = generate_lyrics_v2("Theme", "Artist")
+    lyrics, log, metrics = generate_lyrics("heartbreak", "Drake")
 
     assert lyrics == "Generated lyrics"
-    mock_similar.assert_called()
-    mock_resolve.assert_called()
+    # Only the draft call — no revision call — since targets were already met.
+    assert mock_llm.call_count == 1
+    steps = [entry["step"] for entry in log]
+    assert "Revision" in steps
+    assert any("Not needed" in entry["info"] for entry in log if entry["step"] == "Revision")
+
+
+@patch("src.agent.get_similar_lines")
+@patch("src.agent.call_llm")
+@patch("src.agent._metrics_for")
+def test_generate_lyrics_revises_when_targets_missed(mock_metrics, mock_llm, mock_similar):
+    mock_similar.return_value = ["Line 1"]
+    mock_llm.side_effect = [
+        ("First draft", None),
+        ("Revised draft", None),
+    ]
+    # First call under target, second call meets target.
+    mock_metrics.side_effect = [
+        {k: 0.0 for k in TARGETS},
+        {k: v + 0.1 for k, v in TARGETS.items()},
+    ]
+
+    lyrics, log, metrics = generate_lyrics("heartbreak", "Drake")
+
+    assert lyrics == "Revised draft"
+    assert mock_llm.call_count == 2
+
+
+@patch("src.agent.get_similar_lines")
+@patch("src.agent.call_llm")
+def test_generate_lyrics_returns_error_string_on_failure(mock_llm, mock_similar):
+    mock_similar.return_value = []
+    mock_llm.return_value = (None, "Local model unreachable and no fallback configured")
+
+    lyrics, log, metrics = generate_lyrics("heartbreak")
+
+    assert lyrics.startswith("Error:")
+    assert metrics == {}

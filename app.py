@@ -1,6 +1,6 @@
 import streamlit as st
-from src.agent import generate_lyrics_v2
-from src.evaluate import rhyme_density, syllable_consistency, originality_score
+
+from src.agent import generate_lyrics
 
 
 def main():
@@ -10,53 +10,54 @@ def main():
 
     # Custom CSS for a more polished look
     st.markdown("""
-        <style>
-        .main {
-            background-color: #f8f9fa;
-        }
-        .stButton>button {
-            border-radius: 20px;
-            font-weight: bold;
-            transition: all 0.3s ease;
-        }
-        .stButton>button:hover {
-            transform: scale(1.02);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        }
-        .lyrics-card {
-            background-color: #ffffff;
-            padding: 2rem;
-            border-radius: 15px;
-            border-left: 5px solid #6c5ce7;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
-            font-family: 'Georgia', serif;
-            font-size: 1.2rem;
-            line-height: 1.6;
-            color: #2d3436;
-            white-space: pre-wrap;
-            margin-bottom: 2rem;
-        }
-        .metric-card {
-            background-color: #ffffff;
-            padding: 1rem;
-            border-radius: 10px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-            text-align: center;
-        }
-        </style>
+    <style>
+    .main {
+        background-color: #f8f9fa;
+    }
+    .stButton>button {
+        border-radius: 20px;
+        font-weight: bold;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        transform: scale(1.02);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    .lyrics-card {
+        background-color: #ffffff;
+        padding: 2rem;
+        border-radius: 15px;
+        border-left: 5px solid #6c5ce7;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        font-family: 'Georgia', serif;
+        font-size: 1.2rem;
+        line-height: 1.6;
+        color: #2d3436;
+        white-space: pre-wrap;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background-color: #ffffff;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        text-align: center;
+    }
+    </style>
     """, unsafe_allow_html=True)
-
 
     # Title
     st.title("🎤 Song Lyrics Generator")
-    st.markdown("<p style='text-align: center; color: #636e72;'>Craft professional, artist-inspired lyrics with AI-driven precision</p>", unsafe_allow_html=True)
+    st.markdown(
+        "<p style='text-align: center; color: #636e72;'>"
+        "Craft professional, artist-inspired lyrics with AI-driven precision</p>",
+        unsafe_allow_html=True,
+    )
 
     # Sidebar controls
     st.sidebar.header("⚙️ Settings")
+    model_label = "LyricAI"
 
-    model_type = "AI Agent (Local LLM + Retrieval)"
-
-    # Generation parameters
     with st.sidebar.expander("🎨 Generation Parameters", expanded=True):
         max_words = st.slider("Max Words", 80, 500, 120, 10)
         temperature = st.slider("Temperature (Creativity)", 0.5, 2.0, 1.0, 0.1)
@@ -69,66 +70,69 @@ def main():
     with col1:
         artist_style = st.text_input("Artist Style (Optional)", placeholder="e.g. Drake")
     with col2:
-        mood = st.selectbox("Mood", options=["emotional", "upbeat", "dark", "romantic", "melancholic"], index=0)
+        mood = st.selectbox(
+            "Mood", options=["emotional", "upbeat", "dark", "romantic", "melancholic"], index=0
+        )
 
-    if st.button("Generate Lyrics", use_container_width=True):
-        if not theme.strip():
-            st.warning("Please enter a theme to generate lyrics.")
+    if not st.button("Generate Lyrics", use_container_width=True):
+        return
+
+    if not theme.strip():
+        st.warning("Please enter a theme to generate lyrics.")
+        return
+
+    st.markdown("---")
+    st.subheader("✨ Generated Lyrics")
+    lyrics_placeholder = st.empty()
+
+    def stream_callback(_token, full_text):
+        lyrics_placeholder.markdown(f'<div class="lyrics-card">{full_text}</div>', unsafe_allow_html=True)
+
+    with st.spinner(f"Generating with {model_label}..."):
+        try:
+            raw_lyrics, generation_log, metrics = generate_lyrics(
+                theme, artist_style, mood, max_words, temperature,
+                stream_callback=stream_callback,
+            )
+        except Exception as e:
+            st.error(f"Error during generation: {str(e)}")
             return
 
-        st.markdown("---")
-        st.subheader("✨ Generated Lyrics")
-        lyrics_placeholder = st.empty()
+    if raw_lyrics.startswith("Error:"):
+        st.error(raw_lyrics)
+        return
 
-        def stream_callback(_token, full_text):
-            lyrics_placeholder.markdown(f'<div class="lyrics-card">{full_text}</div>', unsafe_allow_html=True)
+    lyrics_placeholder.markdown(f'<div class="lyrics-card">{raw_lyrics}</div>', unsafe_allow_html=True)
 
-        # Generate lyrics
-        with st.spinner(f"Generating with {model_type}..."):
-            try:
-                raw_lyrics, tool_logs, metrics = generate_lyrics_v2(
-                    theme, artist_style, mood, max_words, temperature,
-                    stream_callback=stream_callback
-                )
-                formatted_lyrics = raw_lyrics # Agent already returns formatted text
-                # Ensure final output is written
-                lyrics_placeholder.markdown(f'<div class="lyrics-card">{formatted_lyrics}</div>', unsafe_allow_html=True)
-            except Exception as e:
-                st.error(f"Error during generation: {str(e)}")
-                return
+    # Evaluation scores
+    st.markdown("### 📊 Quality Metrics")
+    rhyme_score = metrics.get("rhyme_density", 0.0)
+    syllable_score = metrics.get("syllable_consistency", 0.0)
+    orig_score = metrics.get("originality_score", 0.0)
 
-        # Evaluation scores
-        st.markdown("### 📊 Quality Metrics")
-        rhyme_score = metrics.get("rhyme_density", 0.0)
-        syllable_score = metrics.get("syllable_consistency", 0.0)
-        orig_score = metrics.get("originality_score", 0.0)
+    m_col1, m_col2, m_col3 = st.columns(3)
+    with m_col1:
+        st.metric("Rhyme Density", f"{rhyme_score:.2%}")
+    with m_col2:
+        st.metric("Syllable Consistency", f"{syllable_score:.2%}")
+    with m_col3:
+        st.metric("Originality Score", f"{orig_score:.2%}")
 
-        m_col1, m_col2, m_col3 = st.columns(3)
-        with m_col1:
-            st.metric("Rhyme Density", f"{rhyme_score:.2%}")
-        with m_col2:
-            st.metric("Syllable Consistency", f"{syllable_score:.2%}")
-        with m_col3:
-            st.metric("Originality Score", f"{orig_score:.2%}")
+    if generation_log:
+        with st.expander("🛠️ View Generation Steps"):
+            for entry in generation_log:
+                st.write(f"**{entry['step']}:** {entry['info']}")
 
-        if tool_logs:
-            with st.expander("🛠️ View Agent Tool Logs"):
-                for log in tool_logs:
-                    st.write(f"**Tool:** `{log['tool']}`")
-                    st.write(f"**Args:** `{log['args']}`")
-                    st.write(f"**Result:** `{log['result']}`")
-                    st.divider()
-
-        # Word count and model info
-        st.markdown("---")
-        word_count = len(raw_lyrics.split())
-        info_col1, info_col2, info_col3 = st.columns(3)
-        with info_col1:
-            st.metric("Word Count", word_count)
-        with info_col2:
-            st.metric("Model", model_type)
-        with info_col3:
-            st.metric("Mood", mood)
+    # Word count and model info
+    st.markdown("---")
+    word_count = len(raw_lyrics.split())
+    info_col1, info_col2, info_col3 = st.columns(3)
+    with info_col1:
+        st.metric("Word Count", word_count)
+    with info_col2:
+        st.metric("Model", model_label)
+    with info_col3:
+        st.metric("Mood", mood)
 
 
 if __name__ == "__main__":

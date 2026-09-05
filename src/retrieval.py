@@ -1,12 +1,15 @@
 import os
 import pickle
-import json
-import pandas as pd
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import faiss
 from sentence_transformers import SentenceTransformer
 from huggingface_hub import login
-from src.config import INDEX_PATH, METADATA_PATH, RETRIEVAL_MODEL_NAME, HF_TOKEN, CACHE_DIR
+
+from src.config import INDEX_PATH, METADATA_PATH, RETRIEVAL_MODEL_NAME, HF_TOKEN, DATA_PATH
+
 
 class LyricsRetriever:
     def __init__(self, model_name=RETRIEVAL_MODEL_NAME):
@@ -20,19 +23,23 @@ class LyricsRetriever:
         self.metadata = []
 
     def _load_lyrics_dataframe(self):
-        if not CACHE_DIR.exists() or not any(CACHE_DIR.glob("*.json")):
-            raise FileNotFoundError(f"No cached lyrics found in directory: {CACHE_DIR}. Please run src/fetch_lyrics.py first.")
+        """Load every artist CSV in DATA_PATH directly — this is the dataset,
+        there's no separate cache layer to read from anymore."""
+        csv_files = sorted(Path(DATA_PATH).glob("*.csv"))
+        if not csv_files:
+            raise FileNotFoundError(
+                f"No CSV files found in DATA_PATH: {DATA_PATH}. "
+                "Add artist lyric CSVs there, or fetch one with scripts/fetch_lyrics.py."
+            )
 
-        data = []
-        for json_file in sorted(CACHE_DIR.glob("*.json")):
-            with open(json_file, 'r', encoding='utf-8') as f:
-                entry = json.load(f)
-                data.append({
-                    'Artist': entry.get('artist', ''),
-                    'Lyric': entry.get('lyrics', '')
-                })
+        frames = []
+        for csv_file in csv_files:
+            df = pd.read_csv(csv_file)
+            # Some CSV exports carry a leftover unnamed index column — drop it.
+            df = df.loc[:, ~df.columns.str.contains(r'^Unnamed')]
+            frames.append(df[['Artist', 'Lyric']])
 
-        return pd.DataFrame(data)
+        return pd.concat(frames, ignore_index=True)
 
     def build_index(self):
         """Load lyrics, chunk them, embed, and save FAISS index."""
@@ -52,16 +59,14 @@ class LyricsRetriever:
             # Split by standard newlines or <NEWLINE> tags
             lines = lyric.replace(" <NEWLINE> ", "\n").split("\n")
 
-            # For very long lines, we could further split by commas or periods,
-            # but for lyrics, line-by-line is usually a good unit.
             for line in lines:
                 line = line.strip()
-                if len(line) > 10: # Ignore very short fragments
+                if len(line) > 10:  # Ignore very short fragments
                     all_chunks.append(line)
                     all_artists.append(artist)
 
         self.metadata = [
-            {"artist": artist, "text": text} 
+            {"artist": artist, "text": text}
             for artist, text in zip(all_artists, all_chunks)
         ]
 
@@ -69,15 +74,12 @@ class LyricsRetriever:
         embeddings = self.model.encode(all_chunks, show_progress_bar=True)
         embedded_text = np.array(embeddings).astype('float32')
 
-        # Initialize FAISS index
         dimension = embedded_text.shape[1]
         faiss.normalize_L2(embedded_text)
-        # Store the index as an inner product index for cosine similarity
         self.index = faiss.IndexFlatIP(dimension)
         self.index.add(embedded_text)
 
-        # Persist to disk
-        os.makedirs("models", exist_ok=True)
+        os.makedirs(os.path.dirname(INDEX_PATH), exist_ok=True)
         faiss.write_index(self.index, INDEX_PATH)
         with open(METADATA_PATH, "wb") as f:
             pickle.dump(self.metadata, f)
@@ -85,7 +87,7 @@ class LyricsRetriever:
         print(f"Index saved to {INDEX_PATH}")
 
     def load_index(self):
-        """Load FAISS index and metadata from disk."""
+        """Load FAISS index and metadata from disk, building it if missing."""
         if os.path.exists(INDEX_PATH) and os.path.exists(METADATA_PATH):
             self.index = faiss.read_index(INDEX_PATH)
             with open(METADATA_PATH, "rb") as f:
@@ -103,46 +105,38 @@ class LyricsRetriever:
         query_embedding = self.model.encode([query]).astype('float32')
         faiss.normalize_L2(query_embedding)
 
-        # Search for a reasonable initial batch
         search_k = k * 20 if artist else k
-        _ , indices = self.index.search(query_embedding, search_k)
+        _, indices = self.index.search(query_embedding, search_k)
 
         results = []
         for idx in indices[0]:
             if len(results) == k:
                 break
-
-            if idx == -1: 
+            if idx == -1:
                 continue
 
             meta = self.metadata[idx]
             meta_artist = str(meta.get('artist', '')).strip().lower()
-
             if artist and meta_artist != artist.lower():
                 continue
 
             results.append(meta['text'])
 
-        # If not found enough songs and artist was specified, expand search
+        # If not found enough for a specified artist, expand the search.
         if len(results) < k and artist:
-            # Search a larger batch to find more of the specific artist
-            _ , indices = self.index.search(query_embedding, min(len(self.metadata), search_k * 5))
+            _, indices = self.index.search(query_embedding, min(len(self.metadata), search_k * 5))
 
             for idx in indices[0]:
                 if len(results) == k:
                     break
-
-                if idx == -1: 
+                if idx == -1:
                     continue
 
                 meta = self.metadata[idx]
                 meta_artist = str(meta.get('artist', '')).strip().lower()
-
                 if artist and meta_artist != artist.lower():
                     continue
-                
                 if meta['text'] not in results:
                     results.append(meta['text'])
-                
 
         return results
