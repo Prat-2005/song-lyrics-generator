@@ -60,17 +60,21 @@ class LyricsRetriever:
                     all_chunks.append(line)
                     all_artists.append(artist)
 
-        self.metadata = [{"artist": artist, "text": text} for artist, text in zip(all_artists, all_chunks)]
+        self.metadata = [
+            {"artist": artist, "text": text} 
+            for artist, text in zip(all_artists, all_chunks)
+        ]
 
         print(f"Embedding {len(all_chunks)} lines...")
         embeddings = self.model.encode(all_chunks, show_progress_bar=True)
-        embeddings = np.array(embeddings).astype('float32')
+        embedded_text = np.array(embeddings).astype('float32')
 
         # Initialize FAISS index
-        dimension = embeddings.shape[1]
-        faiss.normalize_L2(embeddings)
+        dimension = embedded_text.shape[1]
+        faiss.normalize_L2(embedded_text)
+        # Store the index as an inner product index for cosine similarity
         self.index = faiss.IndexFlatIP(dimension)
-        self.index.add(embeddings)
+        self.index.add(embedded_text)
 
         # Persist to disk
         os.makedirs("models", exist_ok=True)
@@ -101,34 +105,44 @@ class LyricsRetriever:
 
         # Search for a reasonable initial batch
         search_k = k * 20 if artist else k
-        _distances , indices = self.index.search(query_embedding, search_k)
+        _ , indices = self.index.search(query_embedding, search_k)
 
         results = []
         for idx in indices[0]:
-            if idx == -1: 
-                continue
-            meta = self.metadata[idx]
-            meta_artist = str(meta.get('artist', '')).strip().lower()
-            if artist and meta_artist != artist.lower():
-                continue
-            results.append(meta['text'])
             if len(results) == k:
                 break
+
+            if idx == -1: 
+                continue
+
+            meta = self.metadata[idx]
+            meta_artist = str(meta.get('artist', '')).strip().lower()
+
+            if artist and meta_artist != artist.lower():
+                continue
+
+            results.append(meta['text'])
 
         # If not found enough songs and artist was specified, expand search
         if len(results) < k and artist:
             # Search a larger batch to find more of the specific artist
-            _distances , indices = self.index.search(query_embedding, min(len(self.metadata), search_k * 5))
+            _ , indices = self.index.search(query_embedding, min(len(self.metadata), search_k * 5))
+
             for idx in indices[0]:
-                if idx == -1: 
-                    continue
-                meta = self.metadata[idx]
-                meta_artist = str(meta.get('artist', '')).strip().lower()
-                if artist and meta_artist != artist.lower():
-                    continue
-                if meta['text'] not in results:
-                    results.append(meta['text'])
                 if len(results) == k:
                     break
+
+                if idx == -1: 
+                    continue
+
+                meta = self.metadata[idx]
+                meta_artist = str(meta.get('artist', '')).strip().lower()
+
+                if artist and meta_artist != artist.lower():
+                    continue
+                
+                if meta['text'] not in results:
+                    results.append(meta['text'])
+                
 
         return results

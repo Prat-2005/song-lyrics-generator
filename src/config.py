@@ -19,11 +19,11 @@ DATA_PATH = os.getenv("DATA_PATH", str(DATA_DIR))
 if not Path(DATA_PATH).is_absolute():
     DATA_PATH = str(BASE_DIR / DATA_PATH)
 
-INDEX_PATH = os.getenv("INDEX_PATH", str(MODELS_DIR / "lyrics_index.faiss"))
+INDEX_PATH = os.getenv("INDEX_PATH")
 if not Path(INDEX_PATH).is_absolute():
     INDEX_PATH = str(BASE_DIR / INDEX_PATH)
 
-METADATA_PATH = os.getenv("METADATA_PATH", str(MODELS_DIR / "lyrics_metadata.pkl"))
+METADATA_PATH = os.getenv("METADATA_PATH")
 if not Path(METADATA_PATH).is_absolute():
     METADATA_PATH = str(BASE_DIR / METADATA_PATH)
 
