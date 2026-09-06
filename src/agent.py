@@ -1,23 +1,3 @@
-"""
-Lyrics generation.
-
-Design notes (read this before you "improve" it again):
-
-- There is NO agent loop and NO tool-calling here on purpose. Retrieval
-  (get_similar_lines) and rhyme lookups are things WE decide to do in Python,
-  not things the model needs to be given as a "tool" and asked to call. That
-  removes an entire class of bugs: malformed tool-call JSON, models leaking
-  <tools> tags into the output, multi-round tool negotiation, etc.
-
-- There is at most ONE revision pass, and it only happens if the metrics
-  (rhyme density / syllable consistency / originality) actually fall short
-  of target. We check that in code. We never ask the model to grade its own
-  work and decide when to stop — that's slow and unreliable.
-
-- Local model first, cloud fallback second. If both fail, we return a clear
-  error string instead of silently returning None / crashing.
-"""
-
 import json
 import re
 import time
@@ -33,6 +13,7 @@ from src.evaluate import rhyme_density, syllable_consistency, originality_score
 from src.tools import get_similar_lines
 
 _fallback_client = None
+_local_client = None
 
 # Quality bars that decide (in code) whether a revision pass is worth doing.
 TARGETS = {
@@ -40,7 +21,6 @@ TARGETS = {
     "syllable_consistency": 0.70,
     "originality_score": 0.80,
 }
-
 
 def _strip_formatting(text):
     """Light cleanup only — strip a wrapping markdown code fence if present.
@@ -51,8 +31,10 @@ def _strip_formatting(text):
     text = text.strip()
     text = re.sub(r'^```[a-zA-Z]*\n?', '', text)
     text = re.sub(r'\n?```$', '', text)
-    return text.strip()
 
+    # Remove standalone labels such as [Verse 1] or [Chorus].
+    text = re.sub(r'(?m)^\s*\[[^\]]+\]\s*\n?', '', text)
+    return text.strip()
 
 def _get_fallback_client():
     global _fallback_client
@@ -63,6 +45,14 @@ def _get_fallback_client():
         _fallback_client = OpenAI(**kwargs)
     return _fallback_client
 
+def _get_local_client():
+    global _local_client
+    if _local_client is None:
+        kwargs = {"api_key": "ollama", "timeout": MODEL_TIMEOUT}
+        if LOCAL_URL:
+            kwargs["base_url"] = LOCAL_URL
+        _local_client = OpenAI(**kwargs)
+    return _local_client
 
 def _call_fallback(messages, temperature, stream_callback=None):
     """Returns (text, error). Exactly one of them is set."""
@@ -86,7 +76,7 @@ def _call_fallback(messages, temperature, stream_callback=None):
                 delta = chunk.choices[0].delta
                 if delta.content:
                     full_content += delta.content
-                    stream_callback(delta.content, full_content)
+                    stream_callback(full_content)
             return full_content, None
         return response.choices[0].message.content or "", None
     except Exception as e:
@@ -94,60 +84,66 @@ def _call_fallback(messages, temperature, stream_callback=None):
 
 
 def call_llm(messages, temperature=1.0, stream_callback=None):
-    """Call the local model; fall back to the cloud model if it's unreachable.
-    Returns (text, error) — exactly one of them is set."""
-    payload = {
-        "provider": LOCAL_PROVIDER,
-        "model": LOCAL_MODEL,
-        "messages": messages,
-        "stream": bool(stream_callback),
-        "options": {"temperature": temperature},
-    }
+    """Call the local OpenAI-compatible model, then use the fallback model
+    if the local model fails.
 
+    Returns:
+        (text, error)
+    """
+    if not LOCAL_MODEL:
+        return None, "LOCAL_MODEL is not set in .env"
+    
     try:
-        response = requests.post(
-            LOCAL_URL, json=payload, timeout=MODEL_TIMEOUT, stream=bool(stream_callback)
+        local_client = _get_local_client()
+        response = local_client.chat.completions.create(
+            model=LOCAL_MODEL,
+            messages=messages,
+            temperature=temperature,
+            stream=stream_callback is not None,
         )
-        response.raise_for_status()
 
         if stream_callback:
             full_content = ""
-            for line in response.iter_lines():
-                if not line:
-                    continue
-                chunk = json.loads(line)
-                content = chunk.get("message", {}).get("content", "")
+
+            for chunk in response:
+                content = chunk.choices[0].delta.content
+
                 if content:
                     full_content += content
-                    stream_callback(content, full_content)
+                    stream_callback(full_content)
+
             return full_content, None
+        
+        return response.choices[0].message.content or "", None
 
-        return response.json()["message"]["content"], None
-
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-        print(f"Local model unreachable ({e}). Falling back to {FALLBACK_PROVIDER}...")
-        return _call_fallback(messages, temperature, stream_callback)
     except Exception as e:
-        print(f"Local model error ({e}). Falling back to {FALLBACK_PROVIDER}...")
-        return _call_fallback(messages, temperature, stream_callback)
-
+        print(
+            f"Local model error ({e}). "
+            f"Falling back to {FALLBACK_PROVIDER}..."
+        )
+        return _call_fallback(
+            messages,
+            temperature,
+            stream_callback,
+        )
 
 def _build_prompt(theme, artist_style, mood, max_words, context_lines):
     context_str = "\n".join(f"- {l}" for l in context_lines) or "(no reference lines found)"
 
     system_prompt = (
-        "You are a skilled songwriter. Write lyrics that sound like a real song, "
-        f"in the voice of {artist_style or 'a versatile modern artist'} — not like "
-        "an AI describing one.\n\n"
+        "You are a skilled songwriter. Generate ONLY song lyrics, not explanations, "
+        "analysis, introductions, or commentary. Write lyrics that sound like a real "
+        f"song in the style of {artist_style or 'a versatile modern artist'}. "
+        "If the request is unsafe, briefly refuse it and offer a safe alternative.\n"
         "GUIDELINES:\n"
-        "1. Match the vocabulary, slang, and emotional tone in the reference lines "
-        "below. Avoid generic, overly clean, or AI-sounding language.\n"
-        "2. Rhyme with intent — end most lines on words that genuinely rhyme with "
-        "a nearby line.\n"
-        "3. Keep syllable count per line fairly consistent so it could actually be sung.\n"
-        "4. Avoid clichés — if a line feels generic, make it more specific and personal.\n"
-        "5. Output ONLY the finished lyrics in plain text. No JSON, no markdown, "
-        "no explanations. Simple section labels like [Verse 1] or [Chorus] are fine."
+        "1. Match the vocabulary, slang, emotional tone, and intensity of the requested style.\n"
+        "2. Vulgar language, profanity, and slang are allowed when they naturally fit "
+        "the theme, mood, and requested style. Do not add vulgar words unnecessarily.\n"
+        "3. Rhyme with intent and keep syllable counts reasonably consistent.\n"
+        "4. Avoid generic or overly clean language when stronger language better expresses "
+        "the emotion.\n"
+        "5. Output ONLY the finished lyrics in plain text. Do not include section labels "
+        "such as [Verse 1], [Chorus], or [Bridge]."
     )
 
     user_prompt = (
@@ -156,7 +152,8 @@ def _build_prompt(theme, artist_style, mood, max_words, context_lines):
         f"Artist style: {artist_style or 'Generic'}\n\n"
         "Reference lines from real songs in this style (for tone/vocabulary only — "
         f"don't copy them):\n{context_str}\n\n"
-        f"Write a full song (verses + chorus) of about {max_words} words."
+        f"Write a full song of about {max_words} words. Use profanity only when "
+        "appropriate for the theme, mood, and requested artist style."
     )
 
     return [
@@ -179,6 +176,7 @@ def _passes_targets(metrics):
 
 def _build_revision_prompt(lyrics, metrics, max_words):
     word_count = len(lyrics.split())
+
     return (
         f"Here is the current draft:\n{lyrics}\n\n"
         "--- METRICS (target in brackets) ---\n"
@@ -189,9 +187,12 @@ def _build_revision_prompt(lyrics, metrics, max_words):
         f"Originality: {metrics['originality_score']:.0%} "
         f"[target >{TARGETS['originality_score']:.0%}]\n"
         f"Length: {word_count} words [target ~{max_words}]\n\n"
-        "Revise the lyrics to close the gap on whichever metrics are below "
-        "target, while keeping the theme and style. Output ONLY the revised "
-        "lyrics in plain text."
+        "Revise the draft to improve any metrics below their targets while "
+        "preserving the theme, mood, and requested artist style. "
+        "Profanity, vulgar language, and slang are allowed when they naturally "
+        "fit the theme and style, but do not add them unnecessarily. "
+        "Output ONLY the revised lyrics in plain text. Do not include explanations, "
+        "markdown, or section labels such as [Verse 1], [Chorus], or [Bridge] and other elements."
     )
 
 
@@ -248,7 +249,7 @@ def generate_lyrics(theme, artist_style=None, mood="emotional", max_words=120,
         for i in range(0, len(lyrics), 3):
             chunk = lyrics[i:i + 3]
             full_content += chunk
-            stream_callback(chunk, full_content)
+            stream_callback(full_content)
             time.sleep(0.02)
 
     return lyrics, generation_log, metrics

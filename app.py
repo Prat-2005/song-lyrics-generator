@@ -85,7 +85,7 @@ def main():
     st.subheader("✨ Generated Lyrics")
     lyrics_placeholder = st.empty()
 
-    def stream_callback(_token, full_text):
+    def stream_callback(full_text):
         lyrics_placeholder.markdown(f'<div class="lyrics-card">{full_text}</div>', unsafe_allow_html=True)
 
     with st.spinner(f"Generating with {model_label}..."):

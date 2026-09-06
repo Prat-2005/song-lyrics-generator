@@ -1,11 +1,4 @@
-"""
-Fetch a song's lyrics from LRCLIB and append it to the matching artist CSV
-in data/.
-
-There's no cache/ directory anymore. The CSVs in data/ are the dataset —
-this script writes new songs straight into them instead of stashing a
-separate JSON file per song that the retriever then had to know to read.
-"""
+"""Fetch a song's lyrics from LRCLIB and append it to the matching artist CSV."""
 
 import logging
 import sys
@@ -16,57 +9,61 @@ import requests
 
 from src.config import DATA_PATH
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+LRCLIB_GET = "https://lrclib.net/api/get"
+LRCLIB_SEARCH = "https://lrclib.net/api/search"
 
-def fetch_lrclib(artist: str, track: str):
-    """Fetch plain lyrics for a track from LRCLIB. Returns None if not found."""
+
+def _fetch(endpoint: str, params: dict) -> str | None:
+    """Hit an LRCLIB endpoint and return plain lyrics, or None."""
+    try:
+        response = requests.get(endpoint, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        # Handle both single-result and list-result responses
+        payload = data[0] if isinstance(data, list) else data
+        return payload.get("plainLyrics")
+    except Exception as exc:
+        logger.debug(f"LRCLIB request failed: {exc}")
+        return None
+
+
+def fetch_lyrics(artist: str, track: str) -> str | None:
+    """Fetch plain lyrics for a track. Returns None if not found."""
     params = {"artist_name": artist, "track_name": track}
 
-    try:
-        response = requests.get("https://lrclib.net/api/get", params=params, timeout=10)
-        if response.status_code == 200:
-            lyrics = response.json().get("plainLyrics")
-            if lyrics:
-                logger.info(f"Fetched '{track}' by {artist} from LRCLIB (exact match)")
-                return lyrics
-    except Exception as e:
-        logger.debug(f"LRCLIB exact-match lookup failed for {artist} - {track}: {e}")
+    # 1. Exact match
+    lyrics = _fetch(LRCLIB_GET, params)
+    if lyrics:
+        logger.info(f"Fetched '{track}' by {artist} (exact match)")
+        return lyrics
 
-    try:
-        response = requests.get("https://lrclib.net/api/search", params=params, timeout=10)
-        if response.status_code == 200:
-            results = response.json()
-            if results:
-                lyrics = results[0].get("plainLyrics")
-                if lyrics:
-                    logger.info(f"Fetched '{track}' by {artist} from LRCLIB (search match)")
-                    return lyrics
-    except Exception as e:
-        logger.debug(f"LRCLIB search lookup failed for {artist} - {track}: {e}")
+    # 2. Search fallback
+    lyrics = _fetch(LRCLIB_SEARCH, params)
+    if lyrics:
+        logger.info(f"Fetched '{track}' by {artist} (search match)")
+        return lyrics
 
     logger.warning(f"No lyrics found for '{track}' by {artist}")
     return None
 
 
-def append_to_csv(artist: str, title: str, lyrics: str):
-    """Append a fetched song to that artist's CSV in DATA_PATH, creating it if needed."""
+def append_to_csv(artist: str, title: str, lyrics: str) -> None:
+    """Append a song to that artist's CSV, creating it if needed."""
     csv_path = Path(DATA_PATH) / f"{artist.replace(' ', '')}.csv"
     row = pd.DataFrame([{"Artist": artist, "Title": title, "Lyric": lyrics}])
 
-    if csv_path.exists():
-        existing = pd.read_csv(csv_path)
-        combined = pd.concat([existing, row], ignore_index=True)
-    else:
-        combined = row
-
+    existing = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
+    combined = pd.concat([existing, row], ignore_index=True)
     combined.to_csv(csv_path, index=False)
+
     logger.info(f"Saved '{title}' to {csv_path}")
 
 
-def main(artist: str, track: str):
-    lyrics = fetch_lrclib(artist, track)
+def main(artist: str, track: str) -> None:
+    lyrics = fetch_lyrics(artist, track)
     if lyrics:
         append_to_csv(artist, track, lyrics)
     else:
